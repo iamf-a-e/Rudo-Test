@@ -107,13 +107,11 @@ def load_user_state(sender):
             logging.error(f"Error loading user state for {sender}: {e}")
     return None
 
-# Keep save_user_states as a convenience wrapper (saves ALL currently cached users)
 def save_user_states():
     """Save all in-memory user states to Redis (one key per user)."""
     for sender in list(user_states.keys()):
         save_single_user_state(sender)
 
-# load_user_states is only used at startup now to warm the local cache (optional)
 def load_user_states():
     """No-op at startup – states are loaded on demand per user."""
     global user_states
@@ -356,7 +354,8 @@ def detect_language(message, sender=None):
         logging.info(f"Language detected: {detected_lang} with score {max_score}")
         
         current_lang = user_states.get(sender, {}).get("language", "english")
-        if detected_lang != current_lang and max_score < 3:
+        # FIX: lowered threshold from 3 to 2 to allow easier language switching
+        if detected_lang != current_lang and max_score < 2:
             logging.info(f"Low confidence switch ({max_score}), keeping current language: {current_lang}")
             return current_lang
             
@@ -764,6 +763,38 @@ def switch_language_and_respond(sender, prompt, phone_id, current_lang, detected
             send("Please enter your pregnancy week number ", sender, phone_id)
     
     save_single_user_state(sender)
+
+
+# ─────────────────────────────────────────────
+#  FIX: Re-detect language on every message
+# ─────────────────────────────────────────────
+
+def maybe_update_language(sender, prompt):
+    """
+    Re-detect language on every incoming message (after registration).
+    Updates user state language if a different language is detected with
+    sufficient confidence. Returns the (possibly updated) language.
+    """
+    state = user_states[sender]
+    current_step = state.get("step", "main_menu")
+
+    # Don't override language during initial detection or registration steps
+    if current_step in ["language_detection", "registration"]:
+        return state.get("language", "english")
+
+    # Don't attempt re-detection for pure digit messages (week numbers etc.)
+    if prompt.strip().isdigit():
+        return state.get("language", "english")
+
+    detected = detect_language(prompt, sender)
+    current_lang = state.get("language", "english")
+
+    if detected != current_lang:
+        logging.info(f"Language switch for {sender}: {current_lang} -> {detected}")
+        state["language"] = detected
+        save_single_user_state(sender)
+
+    return state["language"]
 
 
 def handle_main_menu(sender, prompt, phone_id):
@@ -1627,24 +1658,56 @@ def handle_another_week(sender, prompt, phone_id):
 
 
 def ask_gemini(question: str, lang: str = "english") -> str:
+    # ── FIX: prepend a strict language instruction so Gemini always replies in the correct language ──
+    lang_enforce = {
+        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
+        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
+        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
+        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
+        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
+        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
+    }.get(lang, "Respond in English only.")
+
     try:
         if lang == "shona":
             instruction = (
+                f"{lang_enforce}\n"
                 "Iwe uri mubatsiri wezvehutano hwepamuviri. "
                 "Pindura mubvunzo uyu muShona yakajeka, yakapfava, uye ine ruzivo rwezvehutano:\n\n"
             )
         elif lang == "ndebele":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ungumsizi wezempilo yesisu. "
                 "Phendula lo mbuzo ngesiNdebele esicacile, esilula, futhi enolwazi lwezempilo:\n\n"
             )
         elif lang == "chinyanja":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ndine mphungu wa Thanzi la Amayi. "
                 "Yankhani funso ili m'Chinyanja moyenera, mosavuta, komanso moli ndi umanyambazi wa Thanzi la Amayi:\n\n"
             )
+        elif lang == "lozi":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ki muthusi wa za mapilo wa buimana. "
+                "Alaba lipuzo le ka Silozi se si nepahezi, se si nolofetse, ni se si na ni bupilo:\n\n"
+            )
+        elif lang == "bemba":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ndi kapyunga wa buumi bwa bana. "
+                "Yasuka ilipusho lyi mu Chibemba icasalangana, icapepa, na icali na ubusuma bwa buumi:\n\n"
+            )
+        elif lang == "tonga":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ndi mweenzinyina wa buumi bwa kubaa mwana. "
+                "Mupandule mwaambo wu mu Chitonga chakweelela, chiswiipe, komanso chili a cibelesyo ca buumi:\n\n"
+            )
         else:
             instruction = (
+                f"{lang_enforce}\n"
                 "You are a maternal health assistant. "
                 "Answer the following question clearly, simply, and with accurate health information:\n\n"
             )
@@ -1672,24 +1735,56 @@ def ask_gemini(question: str, lang: str = "english") -> str:
 
 
 def ask_gemini_cancer(question: str, lang: str = "english") -> str:
+    # ── FIX: prepend a strict language instruction ──
+    lang_enforce = {
+        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
+        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
+        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
+        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
+        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
+        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
+    }.get(lang, "Respond in English only.")
+
     try:
         if lang == "shona":
             instruction = (
+                f"{lang_enforce}\n"
                 "Iwe uri mubatsiri wezvehutano hwegomarara rechibereko. "
                 "Pindura mubvunzo uyu muShona yakajeka uye yakapfava:\n\n"
             )
         elif lang == "ndebele":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ungumsizi wezempilo yomhlaza wesibeletho. "
                 "Phendula lo mbuzo ngesiNdebele esicacile futhi esilula:\n\n"
             )
         elif lang == "chinyanja":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ndine mphungu wa thanzi la kansa ya chibereko. "
                 "Yankhani funso ili mu Chinyanja momveka bwino komanso mwaulemu:\n\n"
             )
+        elif lang == "lozi":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ki muthusi wa za kansa ya mulomo wa sibeleko. "
+                "Alaba lipuzo le ka Silozi se si bonahala hande ni se si nolofetse:\n\n"
+            )
+        elif lang == "bemba":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ndi kapyunga wa kansa ya cibeleshi. "
+                "Yasuka ilipusho lyi mu Chibemba icamoneka bwino kabili icapepuka:\n\n"
+            )
+        elif lang == "tonga":
+            instruction = (
+                f"{lang_enforce}\n"
+                "Ndi mweenzinyina wa kansa ya mulomo wa cibeleko. "
+                "Mupandule mwaambo wu mu Chitonga chakweelela alimwi chiswiipe:\n\n"
+            )
         else:
             instruction = (
+                f"{lang_enforce}\n"
                 "You are a cervical cancer health assistant. "
                 "Answer the following question clearly and simply in English:\n\n"
             )
@@ -1708,6 +1803,7 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
 
     except Exception as e:
         print(f"[Gemini Error] {e}")
+        logging.error(f"[Gemini Cancer Error] {type(e).__name__}: {e}")
         return (
             "Pane dambudziko pakupindura mubvunzo wako." if lang == "shona"
             else "Kunenkinga ekuphenduleni umbuzo wakho." if lang == "ndebele"
@@ -1717,6 +1813,16 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
 
 
 def ask_gemini_general(question: str, lang: str) -> str:
+    # ── FIX: always enforce the correct response language ──
+    lang_enforce = {
+        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
+        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
+        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
+        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
+        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
+        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
+    }.get(lang, "Respond in English only.")
+
     try:
         company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
         company_email = "hello@dawa-health.com"
@@ -1725,83 +1831,81 @@ def ask_gemini_general(question: str, lang: str) -> str:
 
         if lang == "shona":
             instruction = (
+                f"{lang_enforce}\n"
                 "Uri mubatsiri wezvehutano ane hunyanzvi hwakakosha muhutano hwevakadzi vane pamuviri uye gomarara remuromo wechibereko. "
                 "Pindura mubvunzo wemushandisi uchishandisa ruzivo rwechokwadi uye rwakavakirwa pauchapupu rwezvehutano. "
                 "ZVINOKOSHA: Mhinduro inofanira kuva yakadzama, ine chokwadi, uye yehunyanzvi. "
                 "USATANGE nemitsara yakaita sekuti 'Zvakanaka', 'Hongu', 'Hezvino', kana kuti 'Rega nditsanangure'. "
-                "USASANGANISA mazwi ekuzadza hurukuro asingakoshi. "
                 "Tanga zvakananga nemhinduro. "
                 "Pedzisa nekuyambira kupfupi kunoti ruzivo urwu harutsivi kuongororwa nachiremba. "
-                "Pindura muChirungu chiri pachena uye chiri nyore:\n\n"
+                "Pindura muShona yakajeka uye yakapfava:\n\n"
             )
         elif lang == "ndebele":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ungumsizi wezempilo ochwepheshile ogxile kwezempilo yabomama abakhulelweyo kanye lomdlavuza womlomo wesibeletho. "
                 "Phendula umbuzo womsebenzisi usebenzisa ulwazi lwezempilo oluqondileyo futhi olusekelwe ebufakazini. "
                 "OKUBALULEKILE: Impendulo kumele ibe eningiliziwe, ibe leqiniso, futhi ibe ngeyobungcweti. "
-                "UNGAKALI ngemisho efana lokuthi 'Kulungile', 'Yebo', 'Nakhu', kumbe 'Ake ngichasise'. "
-                "UNGAFaki amazwi okugcwalisa ingxoxo angabalulekanga. "
+                "UNGAKALI ngemisho efana lokuthi 'Kulungile', 'Yebo', 'Nakhu'. "
                 "Qalisa masinyane ngempendulo uqobo. "
                 "Qedisa ngesexwayiso esifitshane esithi ulwazi lolu aluthathi indawo yokuhlolwa ngudokotela. "
-                "Phendula ngesiNgisi esicacileyo futhi esilula:\n\n"
+                "Phendula ngesiNdebele esicacile:\n\n"
             )
         elif lang == "tonga":
             instruction = (
+                f"{lang_enforce}\n"
                 "Muli mweenzinyina wa buumi uuli mwiinda lyoonse mu buumi bwa banakazi abali mu buumi bwa kubusya mwana alimwi ne ndenda ya mulomo wa cibeleko. "
                 "Mupandule mwaambo wa musisi nikukonzya kwa buumi kululeme alimwi kwakavumbululwa kuli buci bwakazibidwe. "
-                "CINTU CAKUKOSHA: Mpendulo yenu yeelede kuba ndeepe, yakweene, alimwi ya buumi bwa bucita bwabukombi. "
-                "MUSATANGI kwa mazwi nga 'Kulungile', 'Inzya', 'Nciici', naa 'Lekani ndichazye'. "
-                "MUSAFUGI mazwi a kujazya kwa ng'anda atali a bulemu. "
                 "Tangi mpoonya mpoonyo ku mpendulo. "
                 "Malizya a kusinsimuna kufwaafwi kuti ulwazi ulu talusanduki ku lwandano lwa dokotela. "
-                "Mupandule mu Chikuwa chakweelela alimwi chiswiipe:\n\n"
+                "Mupandule mu Chitonga chakweelela alimwi chiswiipe:\n\n"
             )
         elif lang == "chinyanja":
             instruction = (
+                f"{lang_enforce}\n"
                 "Ndinu mthandizi wa zaumoyo wa akatswiri okhazikika pa zaumoyo wa amayi apakati komanso khansa ya khomo la chiberekero. "
                 "Yankhani funso la wogwiritsa ntchito pogwiritsa ntchito chidziwitso cholondola komanso chochokera ku umboni wa sayansi ya zaumoyo. "
                 "CHOFUNIKA: Yankho liyenera kukhala latsatanetsatane, lolondola, komanso laukatswiri. "
-                "MUSAYAMBE ndi mawu ngati 'Chabwino', 'Inde', 'Nazi', kapena 'Ndisiyeni ndifotokoze'. "
-                "MUSAPHATIKIZE mawu odzaza zokambirana osafunika. "
+                "MUSAYAMBE ndi mawu ngati 'Chabwino', 'Inde', 'Nazi'. "
                 "Yambani mwachindunji ndi yankho. "
                 "Malizitsani ndi chenjezo chachidule chonena kuti chidziwitsochi sichimalowa m'malo mwa kuyezetsa kwa dokotala. "
-                "Yankhani mu Chingerezi chomveka bwino komanso chosavuta:\n\n"
+                "Yankhani mu Chinyanja chomveka bwino:\n\n"
             )
         elif lang == "bemba":
             instruction = (
+                f"{lang_enforce}\n"
                 "Uli kapyunga wa buumi uwakwata ubuchindami uwashintilila pa buumi bwa banakashi abali ne fumo pamo ne kansa ya ku mulomo wa cibeleshi. "
                 "Yasuka ilipusho lya muntu uulefwaya amashiwi ukoresha ubusuma bwa buumi ubwalungama kabili ubwashintilila pa bucapo. "
                 "ICAKOSA: Ilyasuko lifwile ukuba ilyapwililika, ilyalungama, kabili ilya bucapo. "
-                "WILATAMBA ne mashiwi nga 'Cisuma', 'Ee', 'Ici cili', nangu 'Lekeni nsoshe'. "
-                "WILAFWIKAKO amashiwi ayakufwailisha ayashili ayafunika. "
                 "Tambilila ku lyasuko mwachindunji. "
                 "Pwishisheni ne cilembelo cipepa icilelanda ati ubu busuma tabusendapo icifulo ca kuyeshiwa kuli dokota. "
-                "Yasukeni mu Chingeleshi icamoneka bwino kabili icapepuka:\n\n"
+                "Yasukeni mu Chibemba icamoneka bwino:\n\n"
             )
         elif lang == "lozi":
             instruction = (
+                f"{lang_enforce}\n"
                 "Mu muthusi wa za mapilo wa bucwani ya iketile hahulu ku mapilo a basali baimana ni kankere ya mulomo wa sibeleko. "
                 "Alaba lipuzo la musebelisi mu kusebelisa ziboho za mapilo ze nepahezi ni ze zishimbilwe ku bupaki bwa sayansi. "
                 "SA BUTOKWA: Karabo i fanele kuba ya bunyinyani, ya niti, ni ya bucwani. "
-                "MU SA QALISE ka mafoko a swana ni 'Ho lukile', 'Eeni', 'Se', kamba 'Ni ka talusa'. "
-                "MU SA KENYE mafoko a ku tlatsa puiso a sa tokwi. "
+                "MU SA QALISE ka mafoko a swana ni 'Ho lukile', 'Eeni', 'Se'. "
                 "Qalisa hanghang ka karabo. "
                 "Felelisa ka temoso ye nyinyani ye e re ziboho ze ha zi nkeleli sibaka sa ku lekolwa ki dokota. "
-                "Arabela ka Sizingelesi se si bonahala hande ni se si nolofetse:\n\n"
+                "Arabela ka Silozi se si bonahala hande:\n\n"
             )
         else:
-            instruction = (                
+            instruction = (
+                f"{lang_enforce}\n"
                 "You are a professional health assistant specializing in maternal health and cervical cancer for Dawa Health. "
                 "Answer the user's question using correct and evidence-based health information. "
                 "IMPORTANT: The response must be detailed, factual, and professional. "
                 "DO NOT start with phrases like 'Okay', 'Sure', 'Here's', or 'Let me explain'. "
                 "DO NOT include any conversational fillers. "
                 "Start directly with the answer. "
-                "Include a brief disclaimer at the end stating that this information does not replace a doctor's evaluation."
-                "If a user asks questions like do you do home visits they are referring to Dawa Health and yes, Dawa Health clinicians do home visits."
-                "If a user asks for a service or say that they want one you check for pricing in {products} "
-                "Instructions in {instructions} are to be strictly followed."
-                f"When a user asks about contact details, use company_email={company_email}, company_phone={company_phone}, company_address={company_address} and company_website={company_website}"
+                "Include a brief disclaimer at the end stating that this information does not replace a doctor's evaluation. "
+                "If a user asks questions like do you do home visits they are referring to Dawa Health and yes, Dawa Health clinicians do home visits. "
+                "If a user asks for a service or say that they want one you check for pricing in {products}. "
+                "Instructions in {instructions} are to be strictly followed. "
+                f"When a user asks about contact details, use company_email={company_email}, company_phone={company_phone}, company_address={company_address} and company_website={company_website}. "
                 "Respond in clear, simple English:\n\n"
             )
 
@@ -2038,18 +2142,20 @@ def webhook():
                                             prompt = message["text"]["body"]
                                             logging.info(f"Processing message from {sender}: {prompt}")
                                             
-                                            # ─── KEY FIX: per-user state loading ───
+                                            # ── Ensure state exists ──
                                             is_new = ensure_user_state(sender)
                                             if not is_new:
                                                 user_states[sender]["first_message"] = False
-                                            # ────────────────────────────────────────
+
+                                            # ── FIX: Re-detect language on every message
+                                            # (skip during first-time language detection & registration)
+                                            maybe_update_language(sender, prompt)
                                             
                                             save_user_conversation(sender, "user", prompt)
                                             handle_conversation_state(sender, prompt, phone_id)
                                             
                                         else:
                                             logging.info(f"Non-text message received from {sender}")
-                                            # Ensure state exists for non-text messages too
                                             ensure_user_state(sender)
                                             state = user_states.get(sender, {})
                                             lang = state.get("language", "english")
