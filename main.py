@@ -76,11 +76,12 @@ safety_settings = [
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},   
 ]
 
-model = genai.GenerativeModel(model_name=model_name,
-                              generation_config=generation_config,
-                              safety_settings=safety_settings)
-
-convo = model.start_chat(history=[])
+# ─────────────────────────────────────────────
+#  REMOVED: global convo object
+#  All Gemini calls now use stateless per-call
+#  generation to prevent cross-user language
+#  contamination from shared chat history.
+# ─────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────
@@ -172,7 +173,6 @@ def get_user_conversation(sender):
             history = redis_client.get(f"conversation:{sender}")
             if not history:
                 return []
-            # Upstash may return an already-decoded list, or a raw JSON string
             if isinstance(history, list):
                 return history
             if isinstance(history, str):
@@ -213,8 +213,6 @@ def detect_language(message, sender=None):
         return "english"
 
     # ── English override ──────────────────────────────────────────────────────
-    # If ≥40 % of the unique words in the message are common English words,
-    # return "english" immediately – before any keyword scoring.
     common_english_words = {
         "the","a","an","is","are","was","were","be","been","being",
         "have","has","had","do","does","did","will","would","could","should",
@@ -251,9 +249,8 @@ def detect_language(message, sender=None):
         if ratio >= 0.40:
             logging.info(f"English override: {en_count}/{len(words_in_msg)} words matched ({ratio:.0%})")
             return "english"
-    # ─────────────────────────────────────────────────────────────────────────
 
-    # Exact single-token matches (checked before scoring)
+    # Exact single-token matches
     exact_matches = {
         "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
                       "zvakanaka", "wadini", "taura", "kwete"],
@@ -271,8 +268,7 @@ def detect_language(message, sender=None):
             logging.info(f"Exact match: {message_lower} -> {lang}")
             return lang
 
-    # Keyword scoring — whole-word boundaries only to prevent false substring hits
-    # (e.g. "uri" must not match inside "during")
+    # Keyword scoring — whole-word boundaries only
     language_keywords = {
         "shona": [
             "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
@@ -319,7 +315,6 @@ def detect_language(message, sender=None):
         ],
     }
 
-    # Phrase-level bonuses (+5 each)
     language_phrases = {
         "chinyanja": ["muli bwanji", "uli ndi chani", "zikomo kwambiri",
                       "muli bwino", "ndili bwino", "nitandizeni nankani"],
@@ -351,14 +346,17 @@ def detect_language(message, sender=None):
         detected_lang = max(scores, key=scores.get)
         logging.info(f"Language scores: {scores} -> {detected_lang}")
 
-        current_lang = user_states.get(sender, {}).get("language", "english")
+        # FIX: use user_states.get safely with fallback
+        current_lang = "english"
+        if sender and sender in user_states:
+            current_lang = user_states[sender].get("language", "english")
+
         if detected_lang != current_lang and max_score < 3:
             logging.info(f"Low confidence ({max_score}), keeping {current_lang}")
             return current_lang
 
         return detected_lang
 
-    # No keywords matched at all — pure ASCII/Latin text → English
     if all(ord(c) < 128 for c in message_lower):
         logging.info("Pure ASCII with no local-language keyword match -> English")
         return "english"
@@ -488,7 +486,7 @@ def remove(*file_paths):
 
 
 def handle_language_detection(sender, prompt, phone_id):
-    detected_lang = detect_language(prompt)
+    detected_lang = detect_language(prompt, sender)
     user_states[sender]["language"] = detected_lang
     user_states[sender]["step"] = "registration"
     user_states[sender]["needs_language_confirmation"] = False
@@ -545,13 +543,14 @@ def handle_registration(sender, prompt, phone_id):
 
 def handle_follow_up(sender, prompt, phone_id):
     state = user_states[sender]
+    # FIX: always read lang fresh from state after any potential reset
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
-    # FIX: intercept greetings before Gemini fallback
     greeting_words = ["hi","hello","hey","hie","mhoro","mhoroi","sawubona","salibonani","moni","muli bwanji","mwabuka buti","mwaiseni","muli shani","mwa bona"]
     if any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words):
         reset_conversation(sender)
+        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
         greet_map = {"shona":"Mhoroi! Ndingakubatsirei nhasi?","ndebele":"Sawubona! Ngingakusiza ngani namuhla?","chinyanja":"Moni! Ndingakuthandizireni lero?","lozi":"Mwa bona! Nka ku thusa ka mini sunu?","tonga":"Moni! Ndingamwafwa shani ilelo?","bemba":"Muli shani! Bushe kuti namwafwa shani lelo?"}
@@ -572,6 +571,12 @@ def handle_follow_up(sender, prompt, phone_id):
                 send("Ngiyabonga! Ungathanda ukuthengwa izinto zokunakekela isisu?", sender, phone_id)
             elif lang == "chinyanja":
                 send("Zikomo! Kodi mukufuna kugula zinthu za Thanzi la Amayi?", sender, phone_id)
+            elif lang == "tonga":
+                send("Twatotela! Ungafuna kugula zinthu za bupilo bwa bana?", sender, phone_id)
+            elif lang == "bemba":
+                send("Natotela! Ufuna ukugula imisansa ya buumi bwa nkashi?", sender, phone_id)
+            elif lang == "lozi":
+                send("Ndalumba! Kana u bata ku landa swakupila swa buimana?", sender, phone_id)
             else:
                 send("Thank you! Would you like to purchase maternal health products?", sender, phone_id)
 
@@ -582,6 +587,12 @@ def handle_follow_up(sender, prompt, phone_id):
                 send("Ngiyabonga! Ungathanda ukuthengwa izinto zokuvikela isilonda somlomo wesibeletho?", sender, phone_id)
             elif lang == "chinyanja":
                 send("Zikomo! Kodi mukufuna kugula zinthu za cervical cancer?", sender, phone_id)
+            elif lang == "tonga":
+                send("Twatotela! Ungafuna kugula zinthu za kansa ya mulomo wa cibeleko?", sender, phone_id)
+            elif lang == "bemba":
+                send("Natotela! Ufuna ukugula imisansa ya kansa ya cibeleshi?", sender, phone_id)
+            elif lang == "lozi":
+                send("Ndalumba! Kana u bata ku landa swakupila swa kankere ya mulomo wa sibeleko?", sender, phone_id)
             else:
                 send("Thank you! Would you like to purchase cervical cancer products?", sender, phone_id)
 
@@ -592,6 +603,12 @@ def handle_follow_up(sender, prompt, phone_id):
                 send("Ngiyabonga! Ungathanda ukuthengwa izinto zokunakekela impilo?", sender, phone_id)
             elif lang == "chinyanja":
                 send("Zikomo! Kodi mukufuna kugula zinthu za thanzo?", sender, phone_id)
+            elif lang == "tonga":
+                send("Twatotela! Ungafuna kugula zinthu za bupilo?", sender, phone_id)
+            elif lang == "bemba":
+                send("Natotela! Ufuna ukugula imisansa ya buumi?", sender, phone_id)
+            elif lang == "lozi":
+                send("Ndalumba! Kana u bata ku landa swakupila?", sender, phone_id)
             else:
                 send("Thank you! Would you like to purchase health products?", sender, phone_id)
 
@@ -601,38 +618,11 @@ def handle_follow_up(sender, prompt, phone_id):
 
     else:
         if len(prompt_lower.split()) > 2:
-            if lang == "shona":
-                send("Ndiri kufunga...", sender, phone_id)
-            elif lang == "ndebele":
-                send("Ngiyacabangisisa...", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Ndikuganiza...", sender, phone_id)
-            elif lang == "tonga":
-                send("Ndikuganizira...", sender, phone_id)
-            elif lang == "bemba":
-                send("Ndikufwailisha...", sender, phone_id)
-            elif lang == "lozi":
-                send("Ni nahana...", sender, phone_id)
-            else:
-                send("Let me think...", sender, phone_id)
+            _send_thinking(sender, phone_id, lang)
 
         reply = ask_gemini_general(prompt, lang)
         send(reply, sender, phone_id)
-
-        if lang == "shona":
-            send("Pane chimwe chamunoda kubvunza here?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Uneminye imibuzo yini?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Kodi muli ndi mafunso ena?", sender, phone_id)
-        elif lang == "tonga":
-            send("Uli ne mabvuzo yanga yonse?", sender, phone_id)
-        elif lang == "bemba":
-            send("Uli ne fimo fyandi ifyakulya?", sender, phone_id)
-        elif lang == "lozi":
-            send("O na mabvuzo a mangi?", sender, phone_id)
-        else:
-            send("Do you have any more questions?", sender, phone_id)
+        _send_more_questions(sender, phone_id, lang)
 
         state["step"] = "general_followup"
         save_single_user_state(sender)
@@ -642,12 +632,42 @@ def is_exact_match(text, responses):
     words = re.findall(r"\b\w+\b", text)
     return any(word in responses for word in words)
 
+
+# ─────────────────────────────────────────────
+#  HELPER: send "thinking" indicator
+# ─────────────────────────────────────────────
+def _send_thinking(sender, phone_id, lang):
+    thinking_map = {
+        "shona": "Ndiri kufunga...",
+        "ndebele": "Ngiyacabangisisa...",
+        "chinyanja": "Ndikuganiza...",
+        "tonga": "Ndikuganizira...",
+        "bemba": "Ndikufwailisha...",
+        "lozi": "Ni nahana...",
+    }
+    send(thinking_map.get(lang, "Let me think..."), sender, phone_id)
+
+
+# ─────────────────────────────────────────────
+#  HELPER: send "any more questions?" prompt
+# ─────────────────────────────────────────────
+def _send_more_questions(sender, phone_id, lang):
+    more_map = {
+        "shona": "Pane chimwe chamunoda kubvunza here?",
+        "ndebele": "Uneminye imibuzo yini?",
+        "chinyanja": "Kodi muli ndi mafunso ena?",
+        "tonga": "Uli ne mabvuzo yanga yonse?",
+        "bemba": "Uli ne fimo fyandi ifyakulya?",
+        "lozi": "O na mabvuzo a mangi?",
+    }
+    send(more_map.get(lang, "Do you have any more questions?"), sender, phone_id)
+
+
 def handle_general_followup(sender, prompt, phone_id):
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
-    # ── FIX: intercept greetings and resets BEFORE doing anything else ──
     greeting_words = [
         "hi", "hello", "hey", "hie",
         "mhoro", "mhoroi", "sawubona", "salibonani",
@@ -661,102 +681,57 @@ def handle_general_followup(sender, prompt, phone_id):
 
     if is_greeting or is_reset:
         reset_conversation(sender)
+        # FIX: re-read lang after reset
         state = user_states[sender]
         lang  = state["language"]
-        if lang == "shona":
-            send("Mhoroi! Ndingakubatsirei nhasi?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Sawubona! Ngingakusiza ngani namuhla?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Moni! Ndingakuthandizireni lero?", sender, phone_id)
-        elif lang == "lozi":
-            send("Mwa bona! Nka ku thusa ka mini sunu?", sender, phone_id)
-        elif lang == "tonga":
-            send("Moni! Ndingamwafwa shani ilelo?", sender, phone_id)
-        elif lang == "bemba":
-            send("Muli shani! Bushe kuti namwafwa shani lelo?", sender, phone_id)
-        else:
-            send("Hello! How can I help you today?", sender, phone_id)
+        greet_map = {
+            "shona": "Mhoroi! Ndingakubatsirei nhasi?",
+            "ndebele": "Sawubona! Ngingakusiza ngani namuhla?",
+            "chinyanja": "Moni! Ndingakuthandizireni lero?",
+            "lozi": "Mwa bona! Nka ku thusa ka mini sunu?",
+            "tonga": "Moni! Ndingamwafwa shani ilelo?",
+            "bemba": "Muli shani! Bushe kuti namwafwa shani lelo?",
+        }
+        send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
         save_single_user_state(sender)
         return
-    # ────────────────────────────────────────────────────────────────────
 
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "inde"]
     no_responses  = ["no", "nah", "aiwa", "kwete", "hapana", "nope", "cha", "ayi"]
 
     if any(r in prompt_lower for r in yes_responses):
-        if lang == "shona":
-            send("Bvunzai mubvunzo wenyu.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyacela ubuze umbuzo wakho.", sender, phone_id)
-        elif lang == "tonga":
-            send("Nkumbira ubvunze mubvuzo wako.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Chonde funsani funso lanu.", sender, phone_id)
-        elif lang == "bemba":
-            send("Nomba, lwishibe fimo lyobe.", sender, phone_id)
-        elif lang == "lozi":
-            send("Nkumbira ubuze mubvuzo wako.", sender, phone_id)
-        else:
-            send("Please ask your question.", sender, phone_id)
-
+        ask_map = {
+            "shona": "Bvunzai mubvunzo wenyu.",
+            "ndebele": "Ngiyacela ubuze umbuzo wakho.",
+            "tonga": "Nkumbira ubvunze mubvuzo wako.",
+            "chinyanja": "Chonde funsani funso lanu.",
+            "bemba": "Nomba, lwishibe fimo lyobe.",
+            "lozi": "Nkumbira ubuze mubvuzo wako.",
+        }
+        send(ask_map.get(lang, "Please ask your question."), sender, phone_id)
         state["step"] = "general_question"
         save_single_user_state(sender)
         return
 
     if any(r in prompt_lower for r in no_responses):
-        if lang == "shona":
-            send("Ndatenda! Iva nezuva rakanaka.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ube nosuku oluhle.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Khalani ndi tsiku labwino.", sender, phone_id)
-        elif lang == "tonga":
-            send("Twatotela! Mube abusiku bwabwino.", sender, phone_id)
-        elif lang == "bemba":
-            send("Natotela! Mubelele bwino.", sender, phone_id)
-        elif lang == "lozi":
-            send("Ndalumba! Mube ni lizazi le linde.", sender, phone_id)
-        else:
-            send("Thank you! Have a good day.", sender, phone_id)
-
+        bye_map = {
+            "shona": "Ndatenda! Iva nezuva rakanaka.",
+            "ndebele": "Ngiyabonga! Ube nosuku oluhle.",
+            "chinyanja": "Zikomo! Khalani ndi tsiku labwino.",
+            "tonga": "Twatotela! Mube abusiku bwabwino.",
+            "bemba": "Natotela! Mubelele bwino.",
+            "lozi": "Ndalumba! Mube ni lizazi le linde.",
+        }
+        send(bye_map.get(lang, "Thank you! Have a good day."), sender, phone_id)
         reset_conversation(sender)
         return
 
-    # Only show "thinking" indicator for genuine content questions, not short phrases
     if len(prompt_lower.split()) > 2:
-        if lang == "shona":
-            send("Ndiri kufunga...", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyacabangisisa...", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Ndikuganiza...", sender, phone_id)
-        elif lang == "tonga":
-            send("Ndikuganizira...", sender, phone_id)
-        elif lang == "bemba":
-            send("Ndikufwailisha...", sender, phone_id)
-        elif lang == "lozi":
-            send("Ni nahana...", sender, phone_id)
-        else:
-            send("Let me think...", sender, phone_id)
+        _send_thinking(sender, phone_id, lang)
 
     reply = ask_gemini_general(prompt, lang)
     send(reply, sender, phone_id)
-
-    if lang == "shona":
-        send("Pane chimwe chamunoda kubvunza here?", sender, phone_id)
-    elif lang == "ndebele":
-        send("Uneminye imibuzo yini?", sender, phone_id)
-    elif lang == "tonga":
-        send("Uli ne mabvuzo yanga yonse?", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Kodi muli ndi mafunso ena?", sender, phone_id)
-    elif lang == "bemba":
-        send("Uli ne fimo fyandi ifyakulya?", sender, phone_id)
-    elif lang == "lozi":
-        send("O na mabvuzo a mangi?", sender, phone_id)
-    else:
-        send("Do you have any more questions?", sender, phone_id)
+    _send_more_questions(sender, phone_id, lang)
 
     state["step"] = "general_followup"
     save_single_user_state(sender)
@@ -766,20 +741,15 @@ def ask_follow_up_question(sender, phone_id):
     state = user_states[sender]
     lang = state["language"]
     
-    if lang == "shona":
-        send("Pane chimwe chandingakubatsira nacho here?", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ingabe kukhona okunye engingakusiza ngakho?", sender, phone_id)
-    elif lang == "tonga":
-        send("Kuli chinco nchingakusebelesya nacho", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Kodi pali zina zomwe ndingakuthandizireni?", sender, phone_id)
-    elif lang == "bemba":
-        send("Kuli fintu fyalumo nshingafye", sender, phone_id)
-    elif lang == "lozi":
-        send("Ki sina sika ni ka thusa ka sona", sender, phone_id)
-    else:
-        send("Is there anything else I can help you with?", sender, phone_id)
+    followup_map = {
+        "shona": "Pane chimwe chandingakubatsira nacho here?",
+        "ndebele": "Ingabe kukhona okunye engingakusiza ngakho?",
+        "tonga": "Kuli chinco nchingakusebelesya nacho",
+        "chinyanja": "Kodi pali zina zomwe ndingakuthandizireni?",
+        "bemba": "Kuli fintu fyalumo nshingafye",
+        "lozi": "Ki sina sika ni ka thusa ka sona",
+    }
+    send(followup_map.get(lang, "Is there anything else I can help you with?"), sender, phone_id)
     
     state["step"] = "follow_up"
     save_single_user_state(sender)
@@ -793,45 +763,34 @@ def switch_language_and_respond(sender, prompt, phone_id, current_lang, detected
     logging.info(f"Language switch detected: {current_lang} -> {detected_lang} at step: {current_step}")
     
     if current_step == "main_menu":
-        if detected_lang == "shona":
-            send("Mhoroi! Ndingakubatsirei nhasi?", sender, phone_id)
-        elif detected_lang == "ndebele":
-            send("Sawubona! Ngingakusiza ngani namuhla?", sender, phone_id)
-        elif detected_lang == "chinyanja":
-            send("Moni! Ndingakuthandizireni lero?", sender, phone_id)
-        elif detected_lang == "lozi":
-            send("Mwa bona! Nka ku thusa ka mini sunu?", sender, phone_id)
-        elif detected_lang == "tonga":
-            send("Moni! Ndingamwafwa shani ilelo?", sender, phone_id)
-        elif detected_lang == "bemba":
-            send("Muli shani! Bushe kuti namwafwa shani lelo?", sender, phone_id)    
-        else:
-            send("Hello! How can I help you today?", sender, phone_id)
+        greet_map = {
+            "shona": "Mhoroi! Ndingakubatsirei nhasi?",
+            "ndebele": "Sawubona! Ngingakusiza ngani namuhla?",
+            "chinyanja": "Moni! Ndingakuthandizireni lero?",
+            "lozi": "Mwa bona! Nka ku thusa ka mini sunu?",
+            "tonga": "Moni! Ndingamwafwa shani ilelo?",
+            "bemba": "Muli shani! Bushe kuti namwafwa shani lelo?",
+        }
+        send(greet_map.get(detected_lang, "Hello! How can I help you today?"), sender, phone_id)
     
     elif current_step == "registration":
         if state.get("phone_digits") is None:
-            if detected_lang == "shona":
-                send("Mhoro! Reggai titange nekunyoresa. Ndapota ndipe manhamba mana ekupedzisira enhare yenyu.", sender, phone_id)
-            elif detected_lang == "ndebele":
-                send("Sawubona! Masige saqala ngokubhalisa. Ngicela unginike amadijithi amane okugcina efoni yakho.", sender, phone_id)
-            elif detected_lang == "chinyanja":
-                send("Moni! Tiyambireni ndi kulembetsa. Chonde ndipatseni manambala anayi omaliza a nambala yanu yafoni.", sender, phone_id)
-            elif detected_lang == "lozi":
-                send("Mwa bona! A re simule ka ku itambula. Dinomolo za mafelele a lina la wena ki zini za mafelele a mane?", sender, phone_id)    
-            else:
-                send("Hello! Let's start with registration. What is the last 4 digits of your number?", sender, phone_id)
+            reg_map = {
+                "shona": "Mhoro! Reggai titange nekunyoresa. Ndapota ndipe manhamba mana ekupedzisira enhare yenyu.",
+                "ndebele": "Sawubona! Masige saqala ngokubhalisa. Ngicela unginike amadijithi amane okugcina efoni yakho.",
+                "chinyanja": "Moni! Tiyambireni ndi kulembetsa. Chonde ndipatseni manambala anayi omaliza a nambala yanu yafoni.",
+                "lozi": "Mwa bona! A re simule ka ku itambula. Dinomolo za mafelele a lina la wena ki zini za mafelele a mane?",
+            }
+            send(reg_map.get(detected_lang, "Hello! Let's start with registration. What is the last 4 digits of your number?"), sender, phone_id)
     
     elif current_step == "ask_week":
-        if detected_lang == "shona":
-            send("Ndapota isa vhiki re pamuviri ", sender, phone_id)
-        elif detected_lang == "ndebele":
-            send("Sicela ufake iviki lokukhulelwa ", sender, phone_id)
-        elif detected_lang == "chinyanja":
-            send("Chonde lowetsani sabata la pakati ", sender, phone_id)
-        elif detected_lang == "lozi":
-            send("Ndapota faka linomolo la viki ya ku imelela mwana ", sender, phone_id)    
-        else:
-            send("Please enter your pregnancy week number ", sender, phone_id)
+        week_map = {
+            "shona": "Ndapota isa vhiki re pamuviri ",
+            "ndebele": "Sicela ufake iviki lokukhulelwa ",
+            "chinyanja": "Chonde lowetsani sabata la pakati ",
+            "lozi": "Ndapota faka linomolo la viki ya ku imelela mwana ",
+        }
+        send(week_map.get(detected_lang, "Please enter your pregnancy week number "), sender, phone_id)
     
     save_single_user_state(sender)
 
@@ -843,17 +802,15 @@ def switch_language_and_respond(sender, prompt, phone_id, current_lang, detected
 def maybe_update_language(sender, prompt):
     """
     Re-detect language on every incoming message (after registration).
-    Updates user state language if a different language is detected with
-    sufficient confidence. Returns the (possibly updated) language.
+    Updates user state language if a different language is detected.
+    Returns the (possibly updated) language.
     """
     state = user_states[sender]
     current_step = state.get("step", "main_menu")
 
-    # Don't override language during initial detection or registration steps
     if current_step in ["language_detection", "registration"]:
         return state.get("language", "english")
 
-    # Don't attempt re-detection for pure digit messages (week numbers etc.)
     if prompt.strip().isdigit():
         return state.get("language", "english")
 
@@ -887,22 +844,18 @@ def handle_main_menu(sender, prompt, phone_id):
     
     if is_greeting or is_reset:
         reset_conversation(sender)
+        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
-        if lang == "shona":
-            send("Mhoroi! Ndingakubatsirei nhasi?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Sawubona! Ngingakusiza ngani namuhla?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Moni! Ndingakuthandizireni lero?", sender, phone_id)
-        elif lang == "lozi":
-            send("Mwa bona! Nka ku thusa ka mini sunu?", sender, phone_id) 
-        elif lang == "tonga":
-            send("Moni! Ndingamwafwa shani ilelo?", sender, phone_id)
-        elif lang == "bemba":
-            send("Muli shani! Bushe kuti namwafwa shani lelo?", sender, phone_id)    
-        else:
-            send("Hello! How can I help you today?", sender, phone_id)
+        greet_map = {
+            "shona": "Mhoroi! Ndingakubatsirei nhasi?",
+            "ndebele": "Sawubona! Ngingakusiza ngani namuhla?",
+            "chinyanja": "Moni! Ndingakuthandizireni lero?",
+            "lozi": "Mwa bona! Nka ku thusa ka mini sunu?",
+            "tonga": "Moni! Ndingamwafwa shani ilelo?",
+            "bemba": "Muli shani! Bushe kuti namwafwa shani lelo?",
+        }
+        send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
         save_single_user_state(sender)
         return
 
@@ -943,31 +896,27 @@ def handle_main_menu(sender, prompt, phone_id):
         if prompt_lower in ["1", "general", "information", "info", "ruzivo", "ulwazi", "zambiri"]:
             if state.get("topic") == "maternal":
                 state["step"] = "ask_week"
-                if lang == "shona":
-                    send("Ndapota isa vhiki re pamuviri ", sender, phone_id)
-                elif lang == "ndebele":
-                    send("Sicela ufake iviki lokukhulelwa ", sender, phone_id)
-                elif lang == "chinyanja":
-                    send("Chonde lowetsani sabata la pakati ", sender, phone_id)
-                elif lang == "lozi":
-                    send("Ndapota faka linomolo la viki ya ku imelela mwana ", sender, phone_id)    
-                else:
-                    send("Please enter your pregnancy week number:", sender, phone_id)
+                week_map = {
+                    "shona": "Ndapota isa vhiki re pamuviri ",
+                    "ndebele": "Sicela ufake iviki lokukhulelwa ",
+                    "chinyanja": "Chonde lowetsani sabata la pakati ",
+                    "lozi": "Ndapota faka linomolo la viki ya ku imelela mwana ",
+                    "tonga": "Ndatola, ingila nhwiiiki ya kubeleka mwana ",
+                    "bemba": "Napapita, ingisha umulungu wa pa nkundi ",
+                }
+                send(week_map.get(lang, "Please enter your pregnancy week number:"), sender, phone_id)
             elif state.get("topic") == "cervical":
                 cervical_data = get_cervical_data(lang)
                 if cervical_data and len(cervical_data) > 0:
                     send(str(cervical_data[0]), sender, phone_id)
                 else:
-                    if lang == "shona":
-                        send("Ndine urombo, handina kuwana ruzivo rwe cervical cancer parizvino.", sender, phone_id)
-                    elif lang == "ndebele":
-                        send("Uxolo, anginayo imininingwane ye-cervical cancer okwamanje.", sender, phone_id)
-                    elif lang == "chinyanja":
-                        send("Pepani, sindinapeze zambiri za cervical cancer panopa.", sender, phone_id)
-                    elif lang == "lozi":
-                        send("Ndine u luvile, sina kungafumula zintu za kankere ya sibete sunu.", sender, phone_id)    
-                    else:
-                        send("Sorry, I couldn't find cervical cancer information at the moment.", sender, phone_id)
+                    no_data_map = {
+                        "shona": "Ndine urombo, handina kuwana ruzivo rwe cervical cancer parizvino.",
+                        "ndebele": "Uxolo, anginayo imininingwane ye-cervical cancer okwamanje.",
+                        "chinyanja": "Pepani, sindinapeze zambiri za cervical cancer panopa.",
+                        "lozi": "Ndine u luvile, sina kungafumula zintu za kankere ya sibete sunu.",
+                    }
+                    send(no_data_map.get(lang, "Sorry, I couldn't find cervical cancer information at the moment."), sender, phone_id)
                 
                 ask_cervical_more_info(sender, phone_id)
             save_single_user_state(sender)
@@ -976,102 +925,109 @@ def handle_main_menu(sender, prompt, phone_id):
         elif prompt_lower in ["2", "specific", "question", "questions", "mubvunzo", "umbuzo", "funso"]:
             if state.get("topic") == "maternal":
                 state["step"] = "maternal_question_choice"
-                if lang == "shona":
-                    send(
+                q_map = {
+                    "shona": (
                         "Sarudza mubvunzo:\n"
                         "1. Ndezvikaita zviratidzo zvepamuviri?\n"
                         "2. Ndeapi marairiro ezvokudya?\n"
-                        "3. Ndingafanire kuona chiremba riini?",
-                        sender, phone_id
-                    )
-                elif lang == "ndebele":
-                    send(
+                        "3. Ndingafanire kuona chiremba riini?"
+                    ),
+                    "ndebele": (
                         "Khetha umbuzo:\n"
                         "1. Ngabe yiziphi izimpawu zesisu?\n"
                         "2. Ngabe yimaphi amathiphu okudla?\n"
-                        "3. Ngabe kufanele ngibone udokotela nini?",
-                        sender, phone_id
-                    )
-                elif lang == "chinyanja":
-                    send(
+                        "3. Ngabe kufanele ngibone udokotela nini?"
+                    ),
+                    "chinyanja": (
                         "Sankhani funso:\n"
                         "1. Ndi zizindikiro zotani za pakati?\n"
                         "2. Ndi malangizo otani okudya?\n"
-                        "3. Ndingafunire kuona dokotala liti?",
-                        sender, phone_id
-                    )
-                elif lang == "lozi":
-                    send(
+                        "3. Ndingafunire kuona dokotala liti?"
+                    ),
+                    "lozi": (
                         "U ka khetha mubuzo noma u buze mubuzo wa wena.\n"
                         "1. Zibonelelo ze ku imelela mwana zezi ntini?\n"
                         "2. Ni maano a ku nwa zintu za bupilo a ka landelwa?\n"
-                        "3. Nini nka ya kwa dokotela?",
-                        sender, phone_id
-                    )  
-                else:
-                    send(
-                        "You can choose a question or ask any of your own.\n"
-                        "1. What are common pregnancy symptoms?\n"
-                        "2. What nutrition tips should I follow?\n"
-                        "3. When should I see a doctor?",
-                        sender, phone_id
-                    )
+                        "3. Nini nka ya kwa dokotela?"
+                    ),
+                    "tonga": (
+                        "Sarudza mubvuzo:\n"
+                        "1. Zizyo zyakubaa mwana nzi?\n"
+                        "2. Malangizo aakudya nzi?\n"
+                        "3. Ndingafwile kubona dokotela lili?"
+                    ),
+                    "bemba": (
+                        "Sala ilipusho:\n"
+                        "1. Ifyo balenanga pa nkundi nshi?\n"
+                        "2. Amabumba ya kulya nshi?\n"
+                        "3. Ngatuke kwa dokota liti?"
+                    ),
+                }
+                send(q_map.get(lang, (
+                    "You can choose a question or ask any of your own.\n"
+                    "1. What are common pregnancy symptoms?\n"
+                    "2. What nutrition tips should I follow?\n"
+                    "3. When should I see a doctor?"
+                )), sender, phone_id)
             elif state.get("topic") == "cervical":
                 state["step"] = "cervical_question_choice"
-                if lang == "shona":
-                    send(
+                cq_map = {
+                    "shona": (
                         "Sarudza mubvunzo:\n"
                         "1. Chii chinonzi cervical cancer?\n"
                         "2. Ndezvipi zviratidzo zvekutanga zvecervical cancer?\n"
-                        "3. Chii chinokonzera cervical cancer?",
-                        sender, phone_id
-                    )
-                elif lang == "ndebele":
-                    send(
+                        "3. Chii chinokonzera cervical cancer?"
+                    ),
+                    "ndebele": (
                         "Khetha umbuzo:\n"
                         "1. Yini i-cervical cancer?\n"
                         "2. Ngabe yiziphi izimpawu zokuqala ze-cervical cancer?\n"
-                        "3. Yini ebangela i-cervical cancer?",
-                        sender, phone_id
-                    )
-                elif lang == "chinyanja":
-                    send(
+                        "3. Yini ebangela i-cervical cancer?"
+                    ),
+                    "chinyanja": (
                         "Sankhani funso:\n"
                         "1. Ndi chiyani cervical cancer?\n"
                         "2. Ndi zizindikiro zotani zoyamba za cervical cancer?\n"
-                        "3. Ndi chiyani chimayambitsa cervical cancer?",
-                        sender, phone_id
-                    )
-                elif lang == "lozi":
-                    send(
+                        "3. Ndi chiyani chimayambitsa cervical cancer?"
+                    ),
+                    "lozi": (
                         "U ka khetha mubuzo noma u buze mubuzo wa wena.\n"
                         "1. Kankere ya sibete sa bomme ki yini?\n"
                         "2. Zibonelelo za kutanga za kankere ya sibete zezi ntini?\n"
-                        "3. Zini zi bakela kankere ya sibete?",
-                        sender, phone_id
-                    )    
-                else:
-                    send(
-                        "You can choose a question or ask any of your own.\n"
-                        "1. What is cervical cancer?\n"
-                        "2. What are the early symptoms of cervical cancer?\n"
-                        "3. What causes cervical cancer?",
-                        sender, phone_id
-                    )
+                        "3. Zini zi bakela kankere ya sibete?"
+                    ),
+                    "tonga": (
+                        "Sarudza mubvuzo:\n"
+                        "1. Kansa ya mulomo wa cibeleko nzi?\n"
+                        "2. Zizyo zyakutanga zya kansa ya mulomo wa cibeleko nzi?\n"
+                        "3. Chiyambitsa kansa ya mulomo wa cibeleko nzi?"
+                    ),
+                    "bemba": (
+                        "Sala ilipusho:\n"
+                        "1. Kansa ya cibeleshi nshi?\n"
+                        "2. Ifyo balenanga mu kutanga kwa kansa ya cibeleshi nshi?\n"
+                        "3. Chiyambisha kansa ya cibeleshi nshi?"
+                    ),
+                }
+                send(cq_map.get(lang, (
+                    "You can choose a question or ask any of your own.\n"
+                    "1. What is cervical cancer?\n"
+                    "2. What are the early symptoms of cervical cancer?\n"
+                    "3. What causes cervical cancer?"
+                )), sender, phone_id)
             save_single_user_state(sender)
             return
 
         else:
-            if lang == "shona":
-                send("Pindura ne '1' kuti uwane ruzivo kana '2' kuti ubvunze mibvunzo.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Phendula ngo-'1' ukuze uthole ulwazi noma '2' ukuze ubuze imibuzo.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Yankhani ndi '1' kuti mupeze zambiri kapena '2' kuti mufunse mafunso.", sender, phone_id)
-            elif lang == "lozi":
-                send("", sender, phone_id)    
-            else:
-                send("Ndapota pindula na '1' ku lwisisa zintu ka bonya noma '2' ku mubuzo wa nene", sender, phone_id)
+            invalid_map = {
+                "shona": "Pindura ne '1' kuti uwane ruzivo kana '2' kuti ubvunze mibvunzo.",
+                "ndebele": "Phendula ngo-'1' ukuze uthole ulwazi noma '2' ukuze ubuze imibuzo.",
+                "chinyanja": "Yankhani ndi '1' kuti mupeze zambiri kapena '2' kuti mufunse mafunso.",
+                "tonga": "Ndapota pindula na '1' ku lwisisa zintu ka bonya noma '2' ku mubuzo wa nene",
+                "bemba": "Yasuka na '1' ukufuna ubunga kana '2' ukufuna ilipusho.",
+                "lozi": "Arabela ka '1' ku fumana litaba kamba '2' ku buza lipuzo.",
+            }
+            send(invalid_map.get(lang, "Please reply '1' for information or '2' for questions."), sender, phone_id)
             return
 
     if state.get("step") == "ask_week":
@@ -1086,100 +1042,87 @@ def handle_main_menu(sender, prompt, phone_id):
                 elif lang == "chinyanja":
                     pattern = rf"\*Sabata {week}:.*?(?=\*Sabata {week+1}:|\Z)"
                 elif lang == "lozi":
-                    pattern = rf"\*Sunda {week}:.*?(?=\*Sunda {week+1}:|\Z)"    
+                    pattern = rf"\*Sunda {week}:.*?(?=\*Sunda {week+1}:|\Z)"
+                elif lang == "bemba":
+                    pattern = rf"\*Umulungu {week}:.*?(?=\*Umulungu {week+1}:|\Z)"
+                elif lang == "tonga":
+                    pattern = rf"\*Nhwiiiki {week}:.*?(?=\*Nhwiiiki {week+1}:|\Z)"
                 else:
                     pattern = rf"\*Week {week}:.*?(?=\*Week {week+1}:|\Z)"
                     
                 match = re.search(pattern, info_text, re.S)
                 if match:
-                    if lang == "shona":
-                        send(f"Ruzivo rwe *Vhiki {week}:*\n\n{match.group(0)}", sender, phone_id)
-                    elif lang == "ndebele":
-                        send(f"Ulwazi lwe *Iviki {week}:*\n\n{match.group(0)}", sender, phone_id)
-                    elif lang == "chinyanja":
-                        send(f"Zambiri za *Sabata {week}:*\n\n{match.group(0)}", sender, phone_id)
-                    elif lang == "lozi":
-                        send(f"Yezi zintu za lwisisa ka bonya ku *Sunda {week}:*\n\n{match.group(0)}", sender, phone_id)    
-                    else:
-                        send(f"Here's information for *Week {week}:*\n\n{match.group(0)}", sender, phone_id)
-                    
+                    header_map = {
+                        "shona": f"Ruzivo rwe *Vhiki {week}:*\n\n",
+                        "ndebele": f"Ulwazi lwe *Iviki {week}:*\n\n",
+                        "chinyanja": f"Zambiri za *Sabata {week}:*\n\n",
+                        "lozi": f"Yezi zintu za lwisisa ka bonya ku *Sunda {week}:*\n\n",
+                        "bemba": f"Icibeela ca *Mulungu {week}:*\n\n",
+                        "tonga": f"Cibeela ca *Nhwiiiki {week}:*\n\n",
+                    }
+                    header = header_map.get(lang, f"Here's information for *Week {week}:*\n\n")
+                    send(f"{header}{match.group(0)}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
-                    if lang == "shona":
-                        send("Hapana ruzivo rwevhiki iyi.", sender, phone_id)
-                    elif lang == "ndebele":
-                        send("Alukho ulwazi lwaleviki.", sender, phone_id)
-                    elif lang == "chinyanja":
-                        send("Palibe zambiri za sabata ili.", sender, phone_id)
-                    elif lang == "lozi":
-                        send("Sina zintu za ku fumwa ka viki ye.", sender, phone_id)    
-                    else:
-                        send("No data available for that week.", sender, phone_id)
+                    no_week_map = {
+                        "shona": "Hapana ruzivo rwevhiki iyi.",
+                        "ndebele": "Alukho ulwazi lwaleviki.",
+                        "chinyanja": "Palibe zambiri za sabata ili.",
+                        "lozi": "Sina zintu za ku fumwa ka viki ye.",
+                        "bemba": "Tapali icibeela ca umulungu wu.",
+                        "tonga": "Tana cibeela ca nhwiiiki iyi.",
+                    }
+                    send(no_week_map.get(lang, "No data available for that week."), sender, phone_id)
                     ask_another_week(sender, phone_id)
         except ValueError:
-            if lang == "shona":
-                send("Ndapota pinda nhamba chaiyo yevhiki kubva pa 1 kusvika pa 40.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Sicela ufake inombolo yeviki evumelekile ephakathi kuka-1 no-40.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Chonde lowetsani nambala yoyenera ya sabata kuchokera pa 1 mpaka 40.", sender, phone_id)
-            elif lang == "lozi":
-                send("Ndapota faka linomolo la viki le li le ka 1 ku ya ka 40.", sender, phone_id)    
-            else:
-                send("Please enter a valid week number between 1 and 40.", sender, phone_id)
+            invalid_week_map = {
+                "shona": "Ndapota pinda nhamba chaiyo yevhiki kubva pa 1 kusvika pa 40.",
+                "ndebele": "Sicela ufake inombolo yeviki evumelekile ephakathi kuka-1 no-40.",
+                "chinyanja": "Chonde lowetsani nambala yoyenera ya sabata kuchokera pa 1 mpaka 40.",
+                "lozi": "Ndapota faka linomolo la viki le li le ka 1 ku ya ka 40.",
+                "bemba": "Napapita, ingisha umulungu ukufuma pa 1 ukufika pa 40.",
+                "tonga": "Ndatola, ingila nhwiiiki kuzwa 1 kusika 40.",
+            }
+            send(invalid_week_map.get(lang, "Please enter a valid week number between 1 and 40."), sender, phone_id)
             ask_another_week(sender, phone_id)
         return  
 
     if state.get("step") == "maternal_question_choice":
         if prompt_lower in ["1", "symptoms", "zviratidzo", "izimpawu", "zizindikiro"]:
-            if lang == "shona":
-                send("Zviratidzo zvepamuviri zvinosanganisira kusvotwa, kuneta, kuvava mazamu, uye kuchinja mweya.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Izimpawu zesisu zihlanganisa isicanucanu, ukukhathala, ubuhlungu bezebelé, nokushintsha kwemizwa.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Zizindikiro za pakati zimaphatikizapo kusanza, kulemba, kubvutika mabele, ndi kusintha kwa maganizo.", sender, phone_id)
-            elif lang == "lozi":
-                send("Limpande ze twayelehileng za buimana li akaretsa ho nyekeloa ke pelo, kukhathala, kubaba kwa matete ni kupotoloka kwa maikuto.", sender, phone_id)    
-            else:
-                send("Common pregnancy symptoms include nausea, fatigue, breast tenderness, and mood swings.", sender, phone_id)
+            sym_map = {
+                "shona": "Zviratidzo zvepamuviri zvinosanganisira kusvotwa, kuneta, kuvava mazamu, uye kuchinja mweya.",
+                "ndebele": "Izimpawu zesisu zihlanganisa isicanucanu, ukukhathala, ubuhlungu bezebelé, nokushintsha kwemizwa.",
+                "chinyanja": "Zizindikiro za pakati zimaphatikizapo kusanza, kulemba, kubvutika mabele, ndi kusintha kwa maganizo.",
+                "lozi": "Limpande ze twayelehileng za buimana li akaretsa ho nyekeloa ke pelo, kukhathala, kubaba kwa matete ni kupotoloka kwa maikuto.",
+                "tonga": "Zizyo zyakubaa mwana nzinzi kusanza, kukola, kuuma mabbele, anilizyo kusanduka.",
+                "bemba": "Ifyo balenanga pa nkundi fifikwata ulwimpa, ubulanda, ukulwala amabere, no kusanduka kwa malinganya.",
+            }
+            send(sym_map.get(lang, "Common pregnancy symptoms include nausea, fatigue, breast tenderness, and mood swings."), sender, phone_id)
     
         elif prompt_lower in ["2", "nutrition", "zvokudya", "ukudla", "kudya"]:
-            if lang == "shona":
-                send("Marairiro ezvokudya: Idya chikafu chakaringana, wedzera folic acid uye iron, uye nwa mvura yakawanda.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Amathiphu okudla: Yidla ukudla okunempilo, khulisa i-folic acid ne-iron, futhi uhlale unamandla.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Malangizo okudya: Idyani chakudya chabwino, onjezerani folic acid ndi iron, ndipo muzikhala ndi madzi.", sender, phone_id)
-            elif lang == "lozi":
-                send("Litaba za swakudya: Ja swakudya se se lekalekanang, engetsa kufumana folic acid ni iron, mi u nne u nwa mezi a mangi.", sender, phone_id)    
-            else:
-                send("Nutrition tips: Eat balanced meals, increase folic acid and iron intake, and stay hydrated.", sender, phone_id)
+            nut_map = {
+                "shona": "Marairiro ezvokudya: Idya chikafu chakaringana, wedzera folic acid uye iron, uye nwa mvura yakawanda.",
+                "ndebele": "Amathiphu okudla: Yidla ukudla okunempilo, khulisa i-folic acid ne-iron, futhi uhlale unamandla.",
+                "chinyanja": "Malangizo okudya: Idyani chakudya chabwino, onjezerani folic acid ndi iron, ndipo muzikhala ndi madzi.",
+                "lozi": "Litaba za swakudya: Ja swakudya se se lekalekanang, engetsa kufumana folic acid ni iron, mi u nne u nwa mezi a mangi.",
+                "tonga": "Malangizo aakudya: Lya chakudya chakwe, engesha folic acid ni iron, anilizyo nwa maanzi amanji.",
+                "bemba": "Amabumba ya kulya: Lya ifya kulya ifya balanso, engesha folic acid ni iron, kabili nwa amenshi ayengi.",
+            }
+            send(nut_map.get(lang, "Nutrition tips: Eat balanced meals, increase folic acid and iron intake, and stay hydrated."), sender, phone_id)
     
         elif prompt_lower in ["3", "doctor", "chiremba", "udokotela", "dokotala"]:
-            if lang == "shona":
-                send("Enda kuchiremba kana uine kurwadziwa kwakanyanya, kubuda ropa kwakawanda, kana fivha yepamusoro.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Iya kudokotela uma unobuhlungu obukhulu, ukuphuma kwegazi okukhulu, noma imfiva ephezulu.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Pitani kudokotala ngati muli ndi kupweteka kwakukulu, kutuluka magazi ambiri, kapena malungo apamwamba.", sender, phone_id)
-            elif lang == "lozi":
-                send("Bona ngaka kapili ha u ka ba ni buhlungu bo boholo, kuelwa mali a mangi, kamba mufufutso o mutuna.", sender, phone_id)    
-            else:
-                send("See a doctor immediately if you experience severe pain, heavy bleeding, or high fever.", sender, phone_id)
+            doc_map = {
+                "shona": "Enda kuchiremba kana uine kurwadziwa kwakanyanya, kubuda ropa kwakawanda, kana fivha yepamusoro.",
+                "ndebele": "Iya kudokotela uma unobuhlungu obukhulu, ukuphuma kwegazi okukhulu, noma imfiva ephezulu.",
+                "chinyanja": "Pitani kudokotala ngati muli ndi kupweteka kwakukulu, kutuluka magazi ambiri, kapena malungo apamwamba.",
+                "lozi": "Bona ngaka kapili ha u ka ba ni buhlungu bo boholo, kuelwa mali a mangi, kamba mufufutso o mutuna.",
+                "tonga": "Bona dokotela kapeli naa uli a kupwetekwa kwakuuluka, kutuluka magazi amanji, naa malungo apamwamba.",
+                "bemba": "Enda kwa dokota kapili naa uli na ubunono bwakucila, ukutuluka nko yamene, kamba ifufumiti ifyakucila.",
+            }
+            send(doc_map.get(lang, "See a doctor immediately if you experience severe pain, heavy bleeding, or high fever."), sender, phone_id)
     
         else:
-            logging.info("DEBUG: Processing free-text maternal question")
-            if lang == "shona":
-                send("Kufunga...", sender, phone_id)
-            elif lang == "ndebele":
-                send("Ucabanga...", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Kuganiza...", sender, phone_id)
-            elif lang == "lozi":
-                send("Kucabanga…", sender, phone_id)    
-            else:
-                send("Thinking...", sender, phone_id)
-    
+            _send_thinking(sender, phone_id, lang)
             gemini_response = ask_gemini(prompt, lang)  
             send(gemini_response, sender, phone_id)
         
@@ -1189,44 +1132,40 @@ def handle_main_menu(sender, prompt, phone_id):
 
     if state.get("step") == "cervical_question_choice":
         if prompt_lower in ["1", "what is it", "what is cervical cancer", "chii", "yini", "chiyani"]:
-            if lang == "shona":
-                send("Cervical cancer chirwere che cervix, chikamu chezasi chechibereko chinobatana nechibereko. Ndicho chirwere chegomarara chechipiri chinowanikwa zvakanyanya pasi rose uye ndicho chinonyanya kuitika kuvakadzi muZambia. Chirwere chinodzivirika uye chinorapika, kunyanya kana chikaonekwa nekukurumidza.", sender, phone_id)
-            elif lang == "ndebele":
-                send("I-cervical cancer yisifo se-cervix, ingxenye engezansi yesibeletho ehlobene nesibeletho. Yisifo somhlaza sesibili esivame kakhulu emhlabeni wonke futhi yisifo esivame kakhulu kwabesifazane eZambia. Isifo esingavinjwa futhi singelapheka, ikakhulukazi uma sitholakala ngokushesha.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Cervical cancer ndi matenda a cervix, gawo lotsika la chibereko lomwe limagwirizana ndi chibereko. Ndimatenda a kansa wachiwiri omwe amapezeka kwambiri padziko lapansi ndipo ndi omwe amachitika kwambiri kwa amayi ku Zambia. Matenda omwe angapweke ndi opatsirika, makamaka akadziwika msanga.", sender, phone_id)
-            elif lang == "lozi":
-                send("Kansa ya mulomo wa popelo ki malwale a mulomo wa popelo, sipande sa fafasi sa popelo se si kopanya kwa mukutu wa botsadi. Ki kansa ya bobeli e atile hahulu kwa basali mwa lifasi kaufela, mi ki yona e atile hahulu kwa basali mwa Zambia. Ki malwale a ka thibelwa ni ku alafiwa, haholoholo ha a lemohuoa kapili.", sender, phone_id)
-            else:
-                send("Cervical cancer is a disease of the cervix, the lower part of the uterus that connects to the vagina. It is the second most common female malignancy worldwide and the most common in females in Zambia. It is a preventable and treatable disease, especially when detected early.", sender, phone_id)
+            cc_what_map = {
+                "shona": "Cervical cancer chirwere che cervix, chikamu chezasi chechibereko chinobatana nechibereko. Ndicho chirwere chegomarara chechipiri chinowanikwa zvakanyanya pasi rose uye ndicho chinonyanya kuitika kuvakadzi muZambia. Chirwere chinodzivirika uye chinorapika, kunyanya kana chikaonekwa nekukurumidza.",
+                "ndebele": "I-cervical cancer yisifo se-cervix, ingxenye engezansi yesibeletho ehlobene nesibeletho. Yisifo somhlaza sesibili esivame kakhulu emhlabeni wonke futhi yisifo esivame kakhulu kwabesifazane eZambia. Isifo esingavinjwa futhi singelapheka, ikakhulukazi uma sitholakala ngokushesha.",
+                "chinyanja": "Cervical cancer ndi matenda a cervix, gawo lotsika la chibereko lomwe limagwirizana ndi chibereko. Ndimatenda a kansa wachiwiri omwe amapezeka kwambiri padziko lapansi ndipo ndi omwe amachitika kwambiri kwa amayi ku Zambia. Matenda omwe angapweke ndi opatsirika, makamaka akadziwika msanga.",
+                "lozi": "Kansa ya mulomo wa popelo ki malwale a mulomo wa popelo, sipande sa fafasi sa popelo se si kopanya kwa mukutu wa botsadi. Ki kansa ya bobeli e atile hahulu kwa basali mwa lifasi kaufela, mi ki yona e atile hahulu kwa basali mwa Zambia. Ki malwale a ka thibelwa ni ku alafiwa, haholoholo ha a lemohuoa kapili.",
+                "tonga": "Kansa ya mulomo wa cibeleko ndi matenda a mulomo wa cibeleko, chipande chakusika cha cibeleko chomwe chimayambana ndi cibeleko. Ndi matenda a kansa wachiwiri omwe amapezeka kwambiri padziko lapansi.",
+                "bemba": "Kansa ya cibeleshi ndi ubwafya bwa mulomo wa cibeleshi. Ndi ubwafya bwachibili ubwafumina ukufuma ku kansa panse yonse.",
+            }
+            send(cc_what_map.get(lang, "Cervical cancer is a disease of the cervix, the lower part of the uterus that connects to the vagina. It is the second most common female malignancy worldwide and the most common in females in Zambia. It is a preventable and treatable disease, especially when detected early."), sender, phone_id)
+
         elif prompt_lower in ["2", "symptoms", "early symptoms", "zviratidzo", "izimpawu", "zizindikiro"]:
-            if lang == "shona":
-                send("Mumatanho ekutanga, cervical cancer kazhinji haina zviratidzo zvinooneka. Ndokusaka kuongororwa nguva nenguva kwakakosha. Sezvo cancer ichikura, zviratidzo zvinogona kusanganisira kubuda ropa kusingawanzo (pakati penguva, mushure mekuita bonde, kana mushure mekuenda kumwedzi), kubuda kwezvipembenene zvinonhuwa, kana kurwadziwa panguva yekuita bonde.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Ezitebhisini zokuqala, i-cervical cancer ivamise ukungabi nezimpawu ezibonakalayo. Yingakho ukuhlolwa ngesikhathi esithile kubalulekile. Njengoba umhlaza ukhula, izimpawu zingahlanganisa ukuphuma kwegazi okungajwayelekile (phakathi kwezikhathi, ngemva kokwenza ucansi, noma ngemva kokungena esikhathini sokugodla), ukuphuma kokomkhando olunephunga elibi, noma ubuhlungu ngesikhathi sokwenza ucansi.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("M'magawo oyamba, cervical cancer imayambira mosazindikika. Ndi chifukwa chake kuyezetsa nthawi ndi nthawi ndi kofunikira. Pomwe kansa ikukula, zizindikiro zingakhale kutuluka magazi osayembekezereka (pakati pa nthawi, pambuyo pa kugonana, kapena pambuyo pa menopause), kutuluka kwa chinyezi choipa, kapena kupweteka panthawi ya kugonana.", sender, phone_id)
-            else:
-                send("In its early stages, cervical cancer often has no noticeable symptoms. This is why regular screening is so important. As the cancer progresses, symptoms may include unusual vaginal bleeding (between periods, after sex, or after menopause), foul-smelling vaginal discharge, or pain during sexual intercourse.", sender, phone_id)
+            cc_sym_map = {
+                "shona": "Mumatanho ekutanga, cervical cancer kazhinji haina zviratidzo zvinooneka. Ndokusaka kuongororwa nguva nenguva kwakakosha. Sezvo cancer ichikura, zviratidzo zvinogona kusanganisira kubuda ropa kusingawanzo, kubuda kwezvipembenene zvinonhuwa, kana kurwadziwa panguva yekuita bonde.",
+                "ndebele": "Ezitebhisini zokuqala, i-cervical cancer ivamise ukungabi nezimpawu ezibonakalayo. Yingakho ukuhlolwa ngesikhathi esithile kubalulekile. Njengoba umhlaza ukhula, izimpawu zingahlanganisa ukuphuma kwegazi okungajwayelekile, ukuphuma kokomkhando olunephunga elibi, noma ubuhlungu ngesikhathi sokwenza ucansi.",
+                "chinyanja": "M'magawo oyamba, cervical cancer imayambira mosazindikika. Ndi chifukwa chake kuyezetsa nthawi ndi nthawi ndi kofunikira. Pomwe kansa ikukula, zizindikiro zingakhale kutuluka magazi osayembekezereka, kutuluka kwa chinyezi choipa, kapena kupweteka panthawi ya kugonana.",
+                "lozi": "Ka nako ya makalelo, kansa ya mulomo wa sibeleko ha i na mabonelo a bonahala. Ki sona se si ama ku lekolwa ka linako za nako ku ba kwa butokwa. Ha kansa i hula, mabonelo a kona ku akaretsa kuelwa mali ka linako ze sa lebelelwi, ku zwahela kwa tumelo ye nuna, kamba buhlungu bo ba teñi ha ku eza za bunde.",
+                "tonga": "Mukutanga kwa matenda, kansa ya mulomo wa cibeleko imaziyizya mosazindikika. Ndi chifukwa chake kuyezetsa nthawi ndi nthawi ndi kofunikira.",
+                "bemba": "Mu nsanga ya imituntumuko, kansa ya cibeleshi ifwilika ukuba takuli ifyo balenanga ifilumba. Ndi ifyo ifikoshi ukuyeshiwa nthawi na nthawi.",
+            }
+            send(cc_sym_map.get(lang, "In its early stages, cervical cancer often has no noticeable symptoms. This is why regular screening is so important. As the cancer progresses, symptoms may include unusual vaginal bleeding (between periods, after sex, or after menopause), foul-smelling vaginal discharge, or pain during sexual intercourse."), sender, phone_id)
+
         elif prompt_lower in ["3", "causes", "what causes it", "chikonzero", "izimbangela", "zoyambitsa"]:
-            if lang == "shona":
-                send("Kazhinji, cervical cancer inokonzerwa nehutachiona husingaperi hweHuman Papilloma Virus (HPV). HPV ihutachiona hwakajairika, hunotapuriranwa nekusangana pabonde. Kunyange immune system yemuviri ichibvisa hutachiona muvanhu vazhinji, hutachiona husingaperi hunogona kukonzera shanduko yamasero inogona kuzopedzisira yaita cancer.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Ezimeni zonke, i-cervical cancer ibangelwa ukutheleleka okungapheli kwe-Human Papilloma Virus (HPV). I-HUV igciwane elivamile, elidluliselwa ngocansi. Ngenkathi amasosha omzimba emuncela igciwane kubantu abaningi, ukutheleleka okungapheli kungaholela ekushintsheni kwamaseli okungajwayelekile okungase igcine kube umhlaza.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("M'magawo onse, cervical cancer imayambitsidwa ndi matenda osatha a Human Papilloma Virus (HPV). HPV ndi matenda amene amapezeka kwambiri, omwe amatengedwa pogonana. Pomwe immune system ya thupi imatulutsa matenda mwa anthu ambiri, matenda osatha angayambitse kusintha kwa maselo komwe kungatheka kukhala kansa.", sender, phone_id)
-            else:
-                send("In almost all cases, cervical cancer is caused by persistent infection with the Human Papilloma Virus (HPV). HPV is a very common, sexually transmitted virus. While the body's immune system clears the virus in most people, a persistent infection can lead to abnormal cell changes that may eventually develop into cancer.", sender, phone_id)
+            cc_cause_map = {
+                "shona": "Kazhinji, cervical cancer inokonzerwa nehutachiona husingaperi hweHuman Papilloma Virus (HPV). HPV ihutachiona hwakajairika, hunotapuriranwa nekusangana pabonde. Kunyange immune system yemuviri ichibvisa hutachiona muvanhu vazhinji, hutachiona husingaperi hunogona kukonzera shanduko yamasero inogona kuzopedzisira yaita cancer.",
+                "ndebele": "Ezimeni zonke, i-cervical cancer ibangelwa ukutheleleka okungapheli kwe-Human Papilloma Virus (HPV). I-HPV igciwane elivamile, elidluliselwa ngocansi. Ngenkathi amasosha omzimba emuncela igciwane kubantu abaningi, ukutheleleka okungapheli kungaholela ekushintsheni kwamaseli okungajwayelekile okungase igcine kube umhlaza.",
+                "chinyanja": "M'magawo onse, cervical cancer imayambitsidwa ndi matenda osatha a Human Papilloma Virus (HPV). HPV ndi matenda amene amapezeka kwambiri, omwe amatengedwa pogonana. Pomwe immune system ya thupi imatulutsa matenda mwa anthu ambiri, matenda osatha angayambitse kusintha kwa maselo komwe kungatheka kukhala kansa.",
+                "lozi": "Mwa mikwa kaufela, kansa ya mulomo wa sibeleko i bakiwa ki kulwala ka nako ye telele kwa Human Papilloma Virus (HPV). HPV ki bulwasi bo bu atile hahulu, bo bu fetisezwa ka ku eza za bunde. Niha mili wa mutu u fanga bulwasi ku batu ba bañata, ku lwala ka nako ye telele ku kona ku leza licinceho za liseli ze si za twanelo ze kona ku isa kwa kansa.",
+                "tonga": "Mu nyengo yonse, kansa ya mulomo wa cibeleko imayambitsidwa ndi matenda osatha a HPV. HPV ndi matenda amene amapezeka kwambiri, omwe amatengedwa pogonana.",
+                "bemba": "Mu nsanga yonse, kansa ya cibeleshi iyambilisha na ubwafya bwa nthawi yonse ya HPV (Human Papilloma Virus). HPV ni ubwafya ubutangwa pangono, ubutampwa ku kupanga umwenda.",
+            }
+            send(cc_cause_map.get(lang, "In almost all cases, cervical cancer is caused by persistent infection with the Human Papilloma Virus (HPV). HPV is a very common, sexually transmitted virus. While the body's immune system clears the virus in most people, a persistent infection can lead to abnormal cell changes that may eventually develop into cancer."), sender, phone_id)
+
         else:
-            if lang == "shona":
-                send("Kufunga...", sender, phone_id)
-            elif lang == "ndebele":
-                send("Ucabanga...", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Kuganiza...", sender, phone_id)
-            else:
-                send("Thinking...", sender, phone_id)
-    
+            _send_thinking(sender, phone_id, lang)
             gemini_response = ask_gemini_cancer(prompt, lang)  
             send(gemini_response, sender, phone_id)
             
@@ -1243,40 +1182,16 @@ def handle_main_menu(sender, prompt, phone_id):
     )
     
     if is_direct_question:
-        if lang == "chinyanja":
-            send("Kuganiza...", sender, phone_id)
-        elif lang == "shona":
-            send("Kufunga...", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ucabanga...", sender, phone_id)
-        else:
-            send("Thinking...", sender, phone_id)
-        
+        _send_thinking(sender, phone_id, lang)
         gemini_response = ask_gemini(prompt, lang)
         send(gemini_response, sender, phone_id)
         ask_follow_up_question(sender, phone_id)
         save_single_user_state(sender)
         return
 
-    lang = state["language"]
-
     gemini_reply = ask_gemini_general(prompt, lang)
     send(gemini_reply, sender, phone_id)
-    
-    if lang == "shona":
-        send("Muchiri nemumwe mubvunzo here?", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ulomunye umbuzo yini?", sender, phone_id)
-    elif lang == "tonga":
-        send("Uli ne mabvuzo yanji yonse?", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Muli ndi mafunso ena?", sender, phone_id)
-    elif lang == "bemba":
-        send("Uli ne fimo fyandi ifyakulya?", sender, phone_id)
-    elif lang == "lozi":
-        send("O na mabvuzo a mangi?", sender, phone_id)
-    else:
-        send("Do you have any more questions?", sender, phone_id)
+    _send_more_questions(sender, phone_id, lang)
     
     state["step"] = "general_followup"
     save_single_user_state(sender)
@@ -1292,15 +1207,15 @@ def handle_purchase_response(sender, prompt, phone_id):
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "yebo"]
     
     if any(response in prompt_lower for response in no_responses):
-        if lang == "shona":
-            send("Ndatenda! Iva nezuva rakanaka. Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ube nosuku oluhle. Uma uneminye imibuzo, qala ingxoxo entsha ngo-'unjani'.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Khalani ndi tsiku labwino. Ngati muli ndi mafunso ena, yambani ponena 'muli bwanji'.", sender, phone_id)
-        else:
-            send("Thank you! Have a nice day. If you have more questions, start over by saying 'hi'.", sender, phone_id)
-        
+        bye_map = {
+            "shona": "Ndatenda! Iva nezuva rakanaka. Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.",
+            "ndebele": "Ngiyabonga! Ube nosuku oluhle. Uma uneminye imibuzo, qala ingxoxo entsha ngo-'unjani'.",
+            "chinyanja": "Zikomo! Khalani ndi tsiku labwino. Ngati muli ndi mafunso ena, yambani ponena 'muli bwanji'.",
+            "tonga": "Twatotela! Mube abusiku bwabwino. Ngaa muli ne mafunso yami, yambani ponena 'mwabuka buti'.",
+            "bemba": "Natotela! Mubelele bwino. Nga muli na ifyafyala ifyalumo, tambuleni ponena 'mwaiseni'.",
+            "lozi": "Ndalumba! Mube ni lizazi le linde. Ha mu na lipuzo le linwi, qalisa ka ku bulela 'mwa bona'.",
+        }
+        send(bye_map.get(lang, "Thank you! Have a nice day. If you have more questions, start over by saying 'hi'."), sender, phone_id)
         reset_conversation(sender)
         return
         
@@ -1313,12 +1228,14 @@ def handle_purchase_response(sender, prompt, phone_id):
                 products_text = format_products_for_display(maternal_products, lang)
                 send(products_text, sender, phone_id)
             else:
-                if lang == "shona":
-                    send("Ndine urombo, hapana zvigadzirwa zvehutano hwepamuviri zvazvino onekwa. Tinokurudzira kuenda kukiriniki yedu kuti uwane rumwe ruzivo.", sender, phone_id)
-                elif lang == "ndebele":
-                    send("Uxolo, azikho izinto zokunakekela isisu ezitholakalayo okwamanje. Sincoma ukuya esibhedlela sethu ukuze uthole eminye imininingwane.", sender, phone_id)
-                else:
-                    send("Sorry, no maternal health products are currently available. We recommend visiting our clinic for more information.", sender, phone_id)
+                no_prod_map = {
+                    "shona": "Ndine urombo, hapana zvigadzirwa zvehutano hwepamuviri zvazvino onekwa. Tinokurudzira kuenda kukiriniki yedu kuti uwane rumwe ruzivo.",
+                    "ndebele": "Uxolo, azikho izinto zokunakekela isisu ezitholakalayo okwamanje. Sincoma ukuya esibhedlela sethu ukuze uthole eminye imininingwane.",
+                    "tonga": "Ndatola, tana zinthu za bupilo bwa kubaa mwana zitholakalaya seesilizyo. Tinkusinja kufuna kuswiilila bukliniki bweesu.",
+                    "bemba": "Natapa, tapali imisansa ya buumi bwa nkashi itholakalayo seesilizyo. Tikusinja ukuya ku kliniki yeesu.",
+                    "lozi": "Ni maswabi, ha ku na swakupila swa buimana se si fumaneha cwale. Lu ku susueza ku ya kwa kiliniki ya luna.",
+                }
+                send(no_prod_map.get(lang, "Sorry, no maternal health products are currently available. We recommend visiting our clinic for more information."), sender, phone_id)
                 
         elif topic == "cervical":
             cervical_products = extract_products_by_category("Cervical Cancer")
@@ -1326,42 +1243,52 @@ def handle_purchase_response(sender, prompt, phone_id):
                 products_text = format_products_for_display(cervical_products, lang)
                 send(products_text, sender, phone_id)
             else:
-                if lang == "shona":
-                    send("Ndine urombo, hapana zvigadzirwa zvecervical cancer zvazvino onekwa. Tinokurudzira kuenda kukiriniki yedu kuti uwane rumwe ruzivo.", sender, phone_id)
-                elif lang == "ndebele":
-                    send("Uxolo, azikho izinto zokuvikela isilonda somlomo wesibeletho ezitholakalayo okwamanje. Sincoma ukuya esibhedlela sethu ukuze uthole eminye imininingwane.", sender, phone_id)
-                else:
-                    send("Sorry, no cervical cancer products are currently available. We recommend visiting our clinic for more information.", sender, phone_id)
+                no_cerv_map = {
+                    "shona": "Ndine urombo, hapana zvigadzirwa zvecervical cancer zvazvino onekwa. Tinokurudzira kuenda kukiriniki yedu kuti uwane rumwe ruzivo.",
+                    "ndebele": "Uxolo, azikho izinto zokuvikela isilonda somlomo wesibeletho ezitholakalayo okwamanje. Sincoma ukuya esibhedlela sethu ukuze uthole eminye imininingwane.",
+                    "tonga": "Ndatola, tana zinthu za kansa ya mulomo wa cibeleko zitholakalaya seesilizyo. Tinkusinja kufuna kuswiilila bukliniki bweesu.",
+                    "bemba": "Natapa, tapali imisansa ya kansa ya cibeleshi itholakalayo seesilizyo. Tikusinja ukuya ku kliniki yeesu.",
+                    "lozi": "Ni maswabi, ha ku na swakupila swa kankere ya mulomo wa sibeleko se si fumaneha cwale. Lu ku susueza ku ya kwa kiliniki ya luna.",
+                }
+                send(no_cerv_map.get(lang, "Sorry, no cervical cancer products are currently available. We recommend visiting our clinic for more information."), sender, phone_id)
         else:
             general_products = extract_products_by_category("General")
             if general_products:
                 products_text = format_products_for_display(general_products, lang)
                 send(products_text, sender, phone_id)
             else:
-                if lang == "shona":
-                    send("Tinokutendai! Tichakubatai mukati memaminitsi mashoma kuti muwedzere ruzivo.", sender, phone_id)
-                elif lang == "ndebele":
-                    send("Siyabonga! Sizokuthinta emizuzwini embalwa ukuze uthole eminye imininingwane.", sender, phone_id)
-                else:
-                    send("Thank you! We'll contact you shortly for more details.", sender, phone_id)
+                gen_map = {
+                    "shona": "Tinokutendai! Tichakubatai mukati memaminitsi mashoma kuti muwedzere ruzivo.",
+                    "ndebele": "Siyabonga! Sizokuthinta emizuzwini embalwa ukuze uthole eminye imininingwane.",
+                    "tonga": "Twatotela! Tinkuumba mukati wa maminiti mashoma kuti mupate zambiri.",
+                    "bemba": "Natotela! Tukakuumba mukati wa maminiti ashono ukufuna ifyalumo fyalumo.",
+                    "lozi": "Ndalumba! Lu ta ku ama ka nako ye nyinyani kuli lu file litaba ze ñwi.",
+                }
+                send(gen_map.get(lang, "Thank you! We'll contact you shortly for more details."), sender, phone_id)
         
-        if lang == "shona":
-            send("Ungada here kuenderera mberi nekutenga chimwe chezvigadzirwa izvi? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ungathanda ukuqhubeka nokuthenga noma yini yale mikhiqizo? ", sender, phone_id)
-        else:
-            send("Would you like to proceed with purchasing any of these products? ", sender, phone_id)
+        proceed_map = {
+            "shona": "Ungada here kuenderera mberi nekutenga chimwe chezvigadzirwa izvi? ",
+            "ndebele": "Ungathanda ukuqhubeka nokuthenga noma yini yale mikhiqizo? ",
+            "chinyanja": "Kodi mukufuna kupitiriza kugula chinthu cha zinthu izi? ",
+            "tonga": "Ungafuna kupitiriza kugula chintu cha zinthu izi? ",
+            "bemba": "Ufuna ukupitiliza ukugula chintu cha imisansa iyi? ",
+            "lozi": "Kana u bata ku zwelapili ku landa se si liñwi sa swakupila se? ",
+        }
+        send(proceed_map.get(lang, "Would you like to proceed with purchasing any of these products? "), sender, phone_id)
         
         state["step"] = "confirm_purchase"
         save_single_user_state(sender)
         
     else:
-        if lang == "shona":
-            send("Handina kunzwisisa. Pindura ndapota: Ungada here kutenga zvigadzirwa? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Angikuzwisisi. Phendula ngicela: Ungathanda ukuthenga imikhiqizo? ", sender, phone_id)
-        else:
-            send("I didn't understand. Please reply: Would you like to purchase products?  ", sender, phone_id)
+        unclear_map = {
+            "shona": "Handina kunzwisisa. Pindura ndapota: Ungada here kutenga zvigadzirwa? ",
+            "ndebele": "Angikuzwisisi. Phendula ngicela: Ungathanda ukuthenga imikhiqizo? ",
+            "chinyanja": "Sindinamve. Yankhani chonde: Kodi mukufuna kugula zinthu? ",
+            "tonga": "Tana kumva. Yankhani chonde: Ungafuna kugula zinthu? ",
+            "bemba": "Nsasumina. Yasuka chonde: Ufuna ukugula imisansa? ",
+            "lozi": "Ha ni utwisisi. Arabela kwa ku ya: Kana u bata ku landa swakupila? ",
+        }
+        send(unclear_map.get(lang, "I didn't understand. Please reply: Would you like to purchase products?  "), sender, phone_id)
 
 
 def handle_purchase_confirmation(sender, prompt, phone_id):
@@ -1373,32 +1300,39 @@ def handle_purchase_confirmation(sender, prompt, phone_id):
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "yebo"]
     
     if any(response in prompt_lower for response in no_responses):
-        if lang == "shona":
-            send("Zvakanaka. Tinokutendai! Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Kulungile. Ngiyabonga! Uma uneminye imibuzo, qala kabusha ngokuthi 'unjani'.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Khalani ndi tsiku labwino. Ngati muli ndi mafunso ena, yambani ponena 'muli bwanji'.", sender, phone_id)
-        else:
-            send("Alright. Thank you! If you have more questions, start over by saying 'hi'.", sender, phone_id)
+        alright_map = {
+            "shona": "Zvakanaka. Tinokutendai! Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.",
+            "ndebele": "Kulungile. Ngiyabonga! Uma uneminye imibuzo, qala kabusha ngokuthi 'unjani'.",
+            "chinyanja": "Zikomo! Khalani ndi tsiku labwino. Ngati muli ndi mafunso ena, yambani ponena 'muli bwanji'.",
+            "tonga": "Chabwino. Twatotela! Ngaa muli ne mafunso yami, yambani ponena 'mwabuka buti'.",
+            "bemba": "Cino cino. Natotela! Nga muli na ifyafyala ifyalumo, tambuleni ponena 'mwaiseni'.",
+            "lozi": "Ho lokile. Ndalumba! Ha mu na lipuzo le linwi, qalisa ka ku bulela 'mwa bona'.",
+        }
+        send(alright_map.get(lang, "Alright. Thank you! If you have more questions, start over by saying 'hi'."), sender, phone_id)
         reset_conversation(sender)
         
     elif any(response in prompt_lower for response in yes_responses):
-        if lang == "shona":
-            send("Tinokutendai! Tichakubatai mukati memaminitsi mashoma kuti muwedzere ruzivo nezvekutenga.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Siyabonga! Sizokuthinta emizuzwini embalwa ukuze uthole eminye imininingwane ngokuthenga.", sender, phone_id)
-        else:
-            send("Thank you! We'll contact you shortly for more details about your purchase.", sender, phone_id)
+        thanks_map = {
+            "shona": "Tinokutendai! Tichakubatai mukati memaminitsi mashoma kuti muwedzere ruzivo nezvekutenga.",
+            "ndebele": "Siyabonga! Sizokuthinta emizuzwini embalwa ukuze uthole eminye imininingwane ngokuthenga.",
+            "chinyanja": "Zikomo! Tidzakuumbanani posachedwapa kuti mupeze zambiri zokhudza kugula.",
+            "tonga": "Twatotela! Tinkuumba posachedwapa kuti mupate zambiri zokhudza kugula.",
+            "bemba": "Natotela! Tukakuumba mu kufupifupi ukufuna ifyalumo pa kugula.",
+            "lozi": "Ndalumba! Lu ta ku ama ka nako ye nyinyani kuli lu fe litaba ze ñwi ka za ku landa.",
+        }
+        send(thanks_map.get(lang, "Thank you! We'll contact you shortly for more details about your purchase."), sender, phone_id)
         reset_conversation(sender)
         
     else:
-        if lang == "shona":
-            send("Handina kunzwisisa. Pindura ndapota: Ungada here kuenderera mberi nekutenga? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Angikuzwisisi. Phendula ngicela: Ungathanda ukuqhubeka nokuthenga? ", sender, phone_id)
-        else:
-            send("I didn't understand. Please reply: Would you like to proceed with purchasing?  ", sender, phone_id)
+        unclear_map = {
+            "shona": "Handina kunzwisisa. Pindura ndapota: Ungada here kuenderera mberi nekutenga? ",
+            "ndebele": "Angikuzwisisi. Phendula ngicela: Ungathanda ukuqhubeka nokuthenga? ",
+            "chinyanja": "Sindinamve. Yankhani chonde: Kodi mukufuna kupitiriza kugula? ",
+            "tonga": "Tana kumva. Yankhani chonde: Ungafuna kupitiriza kugula? ",
+            "bemba": "Nsasumina. Yasuka chonde: Ufuna ukupitiliza ukugula? ",
+            "lozi": "Ha ni utwisisi. Arabela kwa ku ya: Kana u bata ku zwelapili ku landa? ",
+        }
+        send(unclear_map.get(lang, "I didn't understand. Please reply: Would you like to proceed with purchasing?  "), sender, phone_id)
 
 
 def extract_products_by_category(category_name):
@@ -1410,45 +1344,55 @@ def extract_products_by_category(category_name):
 
 def format_products_for_display(products_list, lang):
     if not products_list:
-        if lang == "shona":
-            return "Hapana zvigadzirwa zvazvino onekwa."
-        elif lang == "ndebele":
-            return "Azikho imikhiqizo etholakalayo okwamanje."
-        else:
-            return "No products currently available."
+        empty_map = {
+            "shona": "Hapana zvigadzirwa zvazvino onekwa.",
+            "ndebele": "Azikho imikhiqizo etholakalayo okwamanje.",
+            "chinyanja": "Palibe zinthu zitholakalayo pakali pano.",
+            "tonga": "Tana zinthu zitholakalaya seesilizyo.",
+            "bemba": "Tapali imisansa itholakalayo seesilizyo.",
+            "lozi": "Ha ku na swakupila se si fumaneha cwale.",
+        }
+        return empty_map.get(lang, "No products currently available.")
     
-    if lang == "shona":
-        header = "🏥 Zvigadzirwa Zvehutano:\n\n"
-    elif lang == "ndebele":
-        header = "🏥 Imikhiqizo Yezempilo:\n\n"
-    else:
-        header = "🏥 Health Products:\n\n"
+    header_map = {
+        "shona": "🏥 Zvigadzirwa Zvehutano:\n\n",
+        "ndebele": "🏥 Imikhiqizo Yezempilo:\n\n",
+        "chinyanja": "🏥 Zinthu za Thanzo:\n\n",
+        "tonga": "🏥 Zinthu za Bupilo:\n\n",
+        "bemba": "🏥 Imisansa ya Buumi:\n\n",
+        "lozi": "🏥 Swakupila:\n\n",
+    }
+    products_text = header_map.get(lang, "🏥 Health Products:\n\n")
     
-    products_text = header
     for i, product in enumerate(products_list, 1):
         name = product.get('name', 'Unknown Product')
         price = product.get('price', 'Price not available')
         availability = product.get('availability', 'Availability not specified')
         
         if lang == "shona":
-            products_text += f"{i}. {name}\n"
-            products_text += f"   💰 Mutengo: {price}\n"
-            products_text += f"   📦 Kuwanikwa: {availability}\n\n"
+            products_text += f"{i}. {name}\n   💰 Mutengo: {price}\n   📦 Kuwanikwa: {availability}\n\n"
         elif lang == "ndebele":
-            products_text += f"{i}. {name}\n"
-            products_text += f"   💰 Inani: {price}\n"
-            products_text += f"   📦 Ukutholakala: {availability}\n\n"
+            products_text += f"{i}. {name}\n   💰 Inani: {price}\n   📦 Ukutholakala: {availability}\n\n"
+        elif lang == "chinyanja":
+            products_text += f"{i}. {name}\n   💰 Mtengo: {price}\n   📦 Kupezeka: {availability}\n\n"
+        elif lang == "tonga":
+            products_text += f"{i}. {name}\n   💰 Mtengo: {price}\n   📦 Kutholakalaya: {availability}\n\n"
+        elif lang == "bemba":
+            products_text += f"{i}. {name}\n   💰 Intengo: {price}\n   📦 Ukutholakalaya: {availability}\n\n"
+        elif lang == "lozi":
+            products_text += f"{i}. {name}\n   💰 Teko: {price}\n   📦 Ku fumanehanga: {availability}\n\n"
         else:
-            products_text += f"{i}. {name}\n"
-            products_text += f"   💰 Price: {price}\n"
-            products_text += f"   📦 Availability: {availability}\n\n"
+            products_text += f"{i}. {name}\n   💰 Price: {price}\n   📦 Availability: {availability}\n\n"
     
-    if lang == "shona":
-        products_text += "Sarudza chirongwa nekuudza nhamba yacho."
-    elif lang == "ndebele":
-        products_text += "Khetha umkhiqizo ngokutshela inombolo yayo."
-    else:
-        products_text += "Select a product by telling us the number."
+    select_map = {
+        "shona": "Sarudza chirongwa nekuudza nhamba yacho.",
+        "ndebele": "Khetha umkhiqizo ngokutshela inombolo yayo.",
+        "chinyanja": "Sankhani chinthu ponena nambala yake.",
+        "tonga": "Sankhani chinthu ponena nambala yake.",
+        "bemba": "Sala imisansa ka kulanda inomba yayo.",
+        "lozi": "U khethe swakupila ka ku bulela nomolo ya sona.",
+    }
+    products_text += select_map.get(lang, "Select a product by telling us the number.")
     
     return products_text
 
@@ -1459,12 +1403,18 @@ def handle_conversation_state(sender, prompt, phone_id):
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset", "help"]
     if any(keyword in prompt_lower for keyword in reset_keywords):
         reset_conversation(sender)
+        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
-        if lang == "shona":
-            send("Ndingakubatsirei nhasi?", sender, phone_id)
-        else:
-            send("How can I help you today?", sender, phone_id)
+        greet_map = {
+            "shona": "Ndingakubatsirei nhasi?",
+            "ndebele": "Ngingakusiza ngani namuhla?",
+            "chinyanja": "Ndingakuthandizireni lero?",
+            "tonga": "Ndingamwafwa shani ilelo?",
+            "bemba": "Bushe kuti namwafwa shani lelo?",
+            "lozi": "Nka ku thusa ka mini sunu?",
+        }
+        send(greet_map.get(lang, "How can I help you today?"), sender, phone_id)
         return
 
     current_step = state.get("step")
@@ -1495,22 +1445,7 @@ def handle_conversation_state(sender, prompt, phone_id):
         lang = state["language"]
         reply = ask_gemini_general(prompt, lang)
         send(reply, sender, phone_id)
-    
-        if lang == "shona":
-            send("Pane chimwe chamunoda kubvunza here?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Uneminye imibuzo yini?", sender, phone_id)
-        elif lang == "tonga":
-            send("Uli ne mabvuzo yanga yonse?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Kodi muli ndi mafunso ena?", sender, phone_id)
-        elif lang == "bemba":
-            send("Uli ne fimo fyandi ifyakulya?", sender, phone_id)
-        elif lang == "lozi":
-            send("O na mabvuzo a mangi?", sender, phone_id)
-        else:
-            send("Do you have any more questions?", sender, phone_id)
-    
+        _send_more_questions(sender, phone_id, lang)
         state["step"] = "general_followup"
         save_single_user_state(sender)
         return
@@ -1522,14 +1457,15 @@ def ask_cervical_more_info(sender, phone_id):
     state = user_states[sender]
     lang = state["language"]
     
-    if lang == "shona":
-        send("Ungada here kuwana rumwe ruzivo rwe cervical cancer? ", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ungathanda ukuthola eminye imininingwane nge-cervical cancer? ", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Kodi mukufuna kupeza zambiri za cervical cancer?", sender, phone_id)
-    else:
-        send("Would you like to get more information about cervical cancer?  ", sender, phone_id)
+    more_map = {
+        "shona": "Ungada here kuwana rumwe ruzivo rwe cervical cancer? ",
+        "ndebele": "Ungathanda ukuthola eminye imininingwane nge-cervical cancer? ",
+        "chinyanja": "Kodi mukufuna kupeza zambiri za cervical cancer?",
+        "tonga": "Ungafuna kupata zambiri za kansa ya mulomo wa cibeleko?",
+        "bemba": "Ufuna ukupata ifyalumo fyalumo pa kansa ya cibeleshi?",
+        "lozi": "Kana u bata ku fumana litaba ze ñwi ka za kankere ya mulomo wa sibeleko?",
+    }
+    send(more_map.get(lang, "Would you like to get more information about cervical cancer?  "), sender, phone_id)
     
     state["step"] = "cervical_more_info"
     save_single_user_state(sender)
@@ -1538,14 +1474,15 @@ def ask_cervical_question_number(sender, phone_id):
     state = user_states[sender]
     lang = state["language"]
     
-    if lang == "shona":
-        send("Pinda nhamba yemubvunzo kubva pa 1 kusvika pa 100:", sender, phone_id)
-    elif lang == "ndebele":
-        send("Faka inombolo yombuzo kusuka ku-1 kuya ku-100:", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Lowetsani nambala ya funso kuchokera pa 1 mpaka 100:", sender, phone_id)
-    else:
-        send("Enter a question number from 1 to 100:", sender, phone_id)
+    num_map = {
+        "shona": "Pinda nhamba yemubvunzo kubva pa 1 kusvika pa 100:",
+        "ndebele": "Faka inombolo yombuzo kusuka ku-1 kuya ku-100:",
+        "chinyanja": "Lowetsani nambala ya funso kuchokera pa 1 mpaka 100:",
+        "tonga": "Ingila nambala ya mwaambo kuzwa 1 kusika 100:",
+        "bemba": "Ingisha inomba ya ilipusho ukufuma pa 1 ukufika pa 100:",
+        "lozi": "Kenya nomolo ya lipuzo ku zwana 1 ku ya ku 100:",
+    }
+    send(num_map.get(lang, "Enter a question number from 1 to 100:"), sender, phone_id)
     
     state["step"] = "cervical_question_number"
     save_single_user_state(sender)
@@ -1554,14 +1491,15 @@ def ask_keep_learning(sender, phone_id):
     state = user_states[sender]
     lang = state["language"]
     
-    if lang == "shona":
-        send("Ungada here kuramba uchidzidza zvimwe zvinhu zve cervical cancer? ", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ungathanda ukuqhubeka nokufunda ezinye izindaba ze-cervical cancer? ", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Kodi mukufuna kupitiriza kuphunzira zina zambiri za cervical cancer?", sender, phone_id)
-    else:
-        send("Would you like to keep learning more about cervical cancer?  ", sender, phone_id)
+    keep_map = {
+        "shona": "Ungada here kuramba uchidzidza zvimwe zvinhu zve cervical cancer? ",
+        "ndebele": "Ungathanda ukuqhubeka nokufunda ezinye izindaba ze-cervical cancer? ",
+        "chinyanja": "Kodi mukufuna kupitiriza kuphunzira zina zambiri za cervical cancer?",
+        "tonga": "Ungafuna kupitiriza kuphunzira zambiri za kansa ya mulomo wa cibeleko?",
+        "bemba": "Ufuna ukupitiliza ukulearela ifyalumo pa kansa ya cibeleshi?",
+        "lozi": "Kana u bata ku zwelapili ku ithuta litaba ze ñwi ka za kankere ya mulomo wa sibeleko?",
+    }
+    send(keep_map.get(lang, "Would you like to keep learning more about cervical cancer?  "), sender, phone_id)
     
     state["step"] = "keep_learning"
     save_single_user_state(sender)
@@ -1580,14 +1518,15 @@ def handle_cervical_more_info(sender, prompt, phone_id):
         state["step"] = "product_inquiry"
         handle_follow_up(sender, "no", phone_id)
     else:
-        if lang == "shona":
-            send("Handina kunzwisisa. Pindura ndapota: Ungada here kuwana rumwe ruzivo? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Angikuzwisisi. Phendula ngicela: Ungathanda ukuthola eminye imininingwane? ", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Sindinamve. Yankhani chonde: Kodi mukufuna kupeza zambiri?", sender, phone_id)
-        else:
-            send("I didn't understand. Please reply: Would you like to get more information?  ", sender, phone_id)
+        unclear_map = {
+            "shona": "Handina kunzwisisa. Pindura ndapota: Ungada here kuwana rumwe ruzivo? ",
+            "ndebele": "Angikuzwisisi. Phendula ngicela: Ungathanda ukuthola eminye imininingwane? ",
+            "chinyanja": "Sindinamve. Yankhani chonde: Kodi mukufuna kupeza zambiri?",
+            "tonga": "Tana kumva. Yankhani chonde: Ungafuna kupata zambiri?",
+            "bemba": "Nsasumina. Yasuka chonde: Ufuna ukupata ifyalumo fyalumo?",
+            "lozi": "Ha ni utwisisi. Arabela kwa ku ya: Kana u bata ku fumana litaba ze ñwi?",
+        }
+        send(unclear_map.get(lang, "I didn't understand. Please reply: Would you like to get more information?  "), sender, phone_id)
 
 def handle_cervical_question_number(sender, prompt, phone_id):
     state = user_states[sender]
@@ -1612,35 +1551,38 @@ def handle_cervical_question_number(sender, prompt, phone_id):
                     break
             
             if not question_found:
-                if lang == "shona":
-                    send(f"Ndine urombo, handina kuwana mubvunzo wenhamba {question_num}. Edza imwe nhamba kubva pa 1 kusvika pa 100.", sender, phone_id)
-                elif lang == "ndebele":
-                    send(f"Uxolo, angikutholanga umbuzo wenombolo {question_num}. Zama enye inombolo kusuka ku-1 kuya ku-100.", sender, phone_id)
-                elif lang == "chinyanja":
-                    send(f"Pepani, sindinapeze funso la nambala {question_num}. Yesani nambala ina kuchokera pa 1 mpaka 100.", sender, phone_id)
-                else:
-                    send(f"Sorry, I couldn't find question number {question_num}. Please try another number from 1 to 100.", sender, phone_id)
+                not_found_map = {
+                    "shona": f"Ndine urombo, handina kuwana mubvunzo wenhamba {question_num}. Edza imwe nhamba kubva pa 1 kusvika pa 100.",
+                    "ndebele": f"Uxolo, angikutholanga umbuzo wenombolo {question_num}. Zama enye inombolo kusuka ku-1 kuya ku-100.",
+                    "chinyanja": f"Pepani, sindinapeze funso la nambala {question_num}. Yesani nambala ina kuchokera pa 1 mpaka 100.",
+                    "tonga": f"Ndatola, tana kupata mwaambo wa nambala {question_num}. Lingenya nambala inzwi kuzwa 1 kusika 100.",
+                    "bemba": f"Natapa, nshasangile ilipusho lya inomba {question_num}. Esheni inomba inzwi ukufuma pa 1 ukufika pa 100.",
+                    "lozi": f"Ni maswabi, ha ni fumani lipuzo la nomolo {question_num}. Linge nomolo ye nzwi ku zwana 1 ku ya ku 100.",
+                }
+                send(not_found_map.get(lang, f"Sorry, I couldn't find question number {question_num}. Please try another number from 1 to 100."), sender, phone_id)
                 ask_cervical_question_number(sender, phone_id)
         else:
-            if lang == "shona":
-                send("Ndapota pinda nhamba kubva pa 1 kusvika pa 100 chete.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Sicela ufake inombolo ephakathi kuka-1 no-100 kuphela.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Chonde lowetsani nambala kuchokera pa 1 mpaka 100 basi.", sender, phone_id)
-            else:
-                send("Please enter a number between 1 and 100 only.", sender, phone_id)
+            range_map = {
+                "shona": "Ndapota pinda nhamba kubva pa 1 kusvika pa 100 chete.",
+                "ndebele": "Sicela ufake inombolo ephakathi kuka-1 no-100 kuphela.",
+                "chinyanja": "Chonde lowetsani nambala kuchokera pa 1 mpaka 100 basi.",
+                "tonga": "Ndatola, ingila nambala kuzwa 1 kusika 100 fye.",
+                "bemba": "Napapita, ingisha inomba ukufuma pa 1 ukufika pa 100 fye.",
+                "lozi": "Ndapota, kenya nomolo ku zwana 1 ku ya ku 100 feela.",
+            }
+            send(range_map.get(lang, "Please enter a number between 1 and 100 only."), sender, phone_id)
             ask_cervical_question_number(sender, phone_id)
             
     except ValueError:
-        if lang == "shona":
-            send("Ndapota pinda nhamba chaiyo kubva pa 1 kusvika pa 100.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Sicela ufake inombolo evumelekile ephakathi kuka-1 no-100.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Chonde lowetsani nambala yoyenera kuchokera pa 1 mpaka 100.", sender, phone_id)
-        else:
-            send("Please enter a valid number between 1 and 100.", sender, phone_id)
+        invalid_map = {
+            "shona": "Ndapota pinda nhamba chaiyo kubva pa 1 kusvika pa 100.",
+            "ndebele": "Sicela ufake inombolo evumelekile ephakathi kuka-1 no-100.",
+            "chinyanja": "Chonde lowetsani nambala yoyenera kuchokera pa 1 mpaka 100.",
+            "tonga": "Ndatola, ingila nambala yoyenera kuzwa 1 kusika 100.",
+            "bemba": "Napapita, ingisha inomba iyenera ukufuma pa 1 ukufika pa 100.",
+            "lozi": "Ndapota, kenya nomolo ye nepahezi ku zwana 1 ku ya ku 100.",
+        }
+        send(invalid_map.get(lang, "Please enter a valid number between 1 and 100."), sender, phone_id)
         ask_cervical_question_number(sender, phone_id)
 
 def handle_keep_learning(sender, prompt, phone_id):
@@ -1657,27 +1599,29 @@ def handle_keep_learning(sender, prompt, phone_id):
         state["step"] = "product_inquiry"
         handle_follow_up(sender, "no", phone_id)
     else:
-        if lang == "shona":
-            send("Handina kunzwisisa. Pindura ndapota: Ungada here kuramba uchidzidza? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Angikuzwisisi. Phendula ngicela: Ungathanda ukuqhubeka nokufunda? ", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Sindinamve. Yankhani chonde: Kodi mukufuna kupitiriza kuphunzira?", sender, phone_id)
-        else:
-            send("I didn't understand. Please reply: Would you like to keep learning?  ", sender, phone_id)
+        unclear_map = {
+            "shona": "Handina kunzwisisa. Pindura ndapota: Ungada here kuramba uchidzidza? ",
+            "ndebele": "Angikuzwisisi. Phendula ngicela: Ungathanda ukuqhubeka nokufunda? ",
+            "chinyanja": "Sindinamve. Yankhani chonde: Kodi mukufuna kupitiriza kuphunzira?",
+            "tonga": "Tana kumva. Yankhani chonde: Ungafuna kupitiriza kuphunzira?",
+            "bemba": "Nsasumina. Yasuka chonde: Ufuna ukupitiliza ukulearela?",
+            "lozi": "Ha ni utwisisi. Arabela kwa ku ya: Kana u bata ku zwelapili ku ithuta?",
+        }
+        send(unclear_map.get(lang, "I didn't understand. Please reply: Would you like to keep learning?  "), sender, phone_id)
 
 def ask_another_week(sender, phone_id):
     state = user_states[sender]
     lang = state["language"]
     
-    if lang == "shona":
-        send("Ungada here kudzidza nezve mamwe mavhiki epamuviri? ", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ungathanda ukufunda ngamanye amaviki okukhulelwa? ", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Kodi mukufuna kudziwa za masabata ena a pakati?", sender, phone_id)
-    else:
-        send("Would you like to learn about other pregnancy weeks?  ", sender, phone_id)
+    another_map = {
+        "shona": "Ungada here kudzidza nezve mamwe mavhiki epamuviri? ",
+        "ndebele": "Ungathanda ukufunda ngamanye amaviki okukhulelwa? ",
+        "chinyanja": "Kodi mukufuna kudziwa za masabata ena a pakati?",
+        "tonga": "Ungafuna kudziwa za manhwiiiki eni a kubaa mwana?",
+        "bemba": "Ufuna ukuishiba pa myeshi iyengi ya pa nkundi?",
+        "lozi": "Kana u bata ku ithuta ka za maviki a manwi a buimana?",
+    }
+    send(another_map.get(lang, "Would you like to learn about other pregnancy weeks?  "), sender, phone_id)
     
     state["step"] = "ask_another_week"
     save_single_user_state(sender)
@@ -1693,245 +1637,209 @@ def handle_another_week(sender, prompt, phone_id):
     
     if any(response in prompt_lower for response in yes_responses):
         state["step"] = "ask_week"
-        if lang == "shona":
-            send("Ndapota isa vhiki re pamuviri ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Sicela ufake iviki lokukhulelwa ", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Chonde lowetsani sabata la pakati ", sender, phone_id)
-        else:
-            send("Please enter your pregnancy week number ", sender, phone_id)
+        week_map = {
+            "shona": "Ndapota isa vhiki re pamuviri ",
+            "ndebele": "Sicela ufake iviki lokukhulelwa ",
+            "chinyanja": "Chonde lowetsani sabata la pakati ",
+            "lozi": "Ndapota faka linomolo la viki ya ku imelela mwana ",
+            "tonga": "Ndatola, ingila nhwiiiki ya kubeleka mwana ",
+            "bemba": "Napapita, ingisha umulungu wa pa nkundi ",
+        }
+        send(week_map.get(lang, "Please enter your pregnancy week number "), sender, phone_id)
         save_single_user_state(sender)
         
     elif any(response in prompt_lower for response in no_responses):
         state["step"] = "product_inquiry"
         state["topic"] = "maternal"
         
-        if lang == "shona":
-            send("Ndatenda! Ungada here kutenga zvigadzirwa zvehutano hwepamuviri? Tinopa:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Maternal Care Kits", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ungathanda ukuthengwa izinto zokunakekela isisu? Sinakho:\n- Ama-Prenatal Vitamins\n- Izinto zokuhlola isisu\n- Amakhithi okunakekela isisu", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Kodi mukufuna kugula zinthu za Thanzi la Amayi? Tili ndi:\n- Mavitamini a Prenatal\n- Zoyezera pakati\n- Makiti a Thanzi la Amayi", sender, phone_id)
-        else:
-            send("Thank you! Would you like to purchase maternal health products? We offer:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Maternal Care Kits", sender, phone_id)
+        prod_offer_map = {
+            "shona": "Ndatenda! Ungada here kutenga zvigadzirwa zvehutano hwepamuviri? Tinopa:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Maternal Care Kits",
+            "ndebele": "Ngiyabonga! Ungathanda ukuthengwa izinto zokunakekela isisu? Sinakho:\n- Ama-Prenatal Vitamins\n- Izinto zokuhlola isisu\n- Amakhithi okunakekela isisu",
+            "chinyanja": "Zikomo! Kodi mukufuna kugula zinthu za Thanzi la Amayi? Tili ndi:\n- Mavitamini a Prenatal\n- Zoyezera pakati\n- Makiti a Thanzi la Amayi",
+            "tonga": "Twatotela! Ungafuna kugula zinthu za bupilo bwa kubaa mwana? Tili na:\n- Mavitamini a Prenatal\n- Zoyezera kubaa mwana\n- Makiti a Bupilo bwa Kubaa Mwana",
+            "bemba": "Natotela! Ufuna ukugula imisansa ya buumi bwa nkashi? Tuli na:\n- Mavitamini a Prenatal\n- Ifyoyeshamo pa nkundi\n- Makiti ya Buumi bwa Nkashi",
+            "lozi": "Ndalumba! Kana u bata ku landa swakupila swa buimana? Lu na:\n- Mavitamini a Prenatal\n- Swakutatuba buimana\n- Makiti a Buimana",
+        }
+        send(prod_offer_map.get(lang, "Thank you! Would you like to purchase maternal health products? We offer:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Maternal Care Kits"), sender, phone_id)
         save_single_user_state(sender)
         
     else:
-        if lang == "shona":
-            send("Handina kunzwisisa. Pindura ndapota: Ungada here kudzidza nezve mamwe mavhiki? ", sender, phone_id)
-        elif lang == "ndebele":
-            send("Angikuzwisisi. Phendula ngicela: Ungathanda ukufunda ngamanye amaviki? ", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Sindinamve. Yankhani chonde: Kodi mukufuna kudziwa za masabata ena?", sender, phone_id)
-        else:
-            send("I didn't understand. Please reply: Would you like to learn about other weeks?  ", sender, phone_id)
+        unclear_map = {
+            "shona": "Handina kunzwisisa. Pindura ndapota: Ungada here kudzidza nezve mamwe mavhiki? ",
+            "ndebele": "Angikuzwisisi. Phendula ngicela: Ungathanda ukufunda ngamanye amaviki? ",
+            "chinyanja": "Sindinamve. Yankhani chonde: Kodi mukufuna kudziwa za masabata ena?",
+            "tonga": "Tana kumva. Yankhani chonde: Ungafuna kudziwa za manhwiiiki eni?",
+            "bemba": "Nsasumina. Yasuka chonde: Ufuna ukuishiba pa myeshi iyengi?",
+            "lozi": "Ha ni utwisisi. Arabela kwa ku ya: Kana u bata ku ithuta ka za maviki a manwi?",
+        }
+        send(unclear_map.get(lang, "I didn't understand. Please reply: Would you like to learn about other weeks?  "), sender, phone_id)
+
+
+# ─────────────────────────────────────────────
+#  FIX: All Gemini functions now use stateless
+#  per-call generation — NO shared global convo
+# ─────────────────────────────────────────────
+
+def _get_lang_enforce(lang: str) -> str:
+    return {
+        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
+        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
+        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
+        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
+        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
+        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
+    }.get(lang, "Respond in English only.")
+
+
+def _get_fallback(lang: str) -> str:
+    return {
+        "shona":     "Pane dambudziko pakupindura mubvunzo wako.",
+        "ndebele":   "Kunenkinga ekuphenduleni umbuzo wakho.",
+        "chinyanja": "Pali vuto popanga yankho la funso lanu.",
+        "tonga":     "Kwakali zyuuno mu kupandula mwaambo wako.",
+        "bemba":     "Kuli ubukopo mu kuyasuka ilipusho lyobe.",
+        "lozi":      "Ku na bothata ka ku arabela lipuzo la hao.",
+    }.get(lang, "Sorry, there was a problem getting an answer.")
 
 
 def ask_gemini(question: str, lang: str = "english") -> str:
-    # ── FIX: prepend a strict language instruction so Gemini always replies in the correct language ──
-    lang_enforce = {
-        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
-        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
-        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
-        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
-        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
-        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
-    }.get(lang, "Respond in English only.")
+    """
+    Maternal health Gemini call.
+    FIX: uses stateless generate_content (no shared chat history).
+    FIX: language enforce instruction placed at END of prompt.
+    """
+    lang_enforce = _get_lang_enforce(lang)
+    fallback = _get_fallback(lang)
+
+    instruction_body = {
+        "shona": (
+            "Uri mubatsiri wezvehutano hwepamuviri. "
+            "Pindura mubvunzo uyu muShona yakajeka, yakapfava, uye ine ruzivo rwezvehutano:\n\n"
+        ),
+        "ndebele": (
+            "Ungumsizi wezempilo yesisu. "
+            "Phendula lo mbuzo ngesiNdebele esicacile, esilula, futhi enolwazi lwezempilo:\n\n"
+        ),
+        "chinyanja": (
+            "Ndine mphungu wa Thanzi la Amayi. "
+            "Yankhani funso ili m'Chinyanja moyenera, mosavuta, komanso moli ndi umanyambazi wa Thanzi la Amayi:\n\n"
+        ),
+        "lozi": (
+            "Ki muthusi wa za mapilo wa buimana. "
+            "Alaba lipuzo le ka Silozi se si nepahezi, se si nolofetse, ni se si na ni bupilo:\n\n"
+        ),
+        "bemba": (
+            "Ndi kapyunga wa buumi bwa bana. "
+            "Yasuka ilipusho lyi mu Chibemba icasalangana, icapepa, na icali na ubusuma bwa buumi:\n\n"
+        ),
+        "tonga": (
+            "Ndi mweenzinyina wa buumi bwa kubaa mwana. "
+            "Mupandule mwaambo wu mu Chitonga chakweelela, chiswiipe, komanso chili a cibelesyo ca buumi:\n\n"
+        ),
+    }.get(lang, (
+        "You are a maternal health assistant. "
+        "Answer the following question clearly, simply, and with accurate health information:\n\n"
+    ))
+
+    # FIX: language enforcement moved to END of prompt
+    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
     try:
-        if lang == "shona":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Iwe uri mubatsiri wezvehutano hwepamuviri. "
-                "Pindura mubvunzo uyu muShona yakajeka, yakapfava, uye ine ruzivo rwezvehutano:\n\n"
-            )
-        elif lang == "ndebele":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ungumsizi wezempilo yesisu. "
-                "Phendula lo mbuzo ngesiNdebele esicacile, esilula, futhi enolwazi lwezempilo:\n\n"
-            )
-        elif lang == "chinyanja":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndine mphungu wa Thanzi la Amayi. "
-                "Yankhani funso ili m'Chinyanja moyenera, mosavuta, komanso moli ndi umanyambazi wa Thanzi la Amayi:\n\n"
-            )
-        elif lang == "lozi":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ki muthusi wa za mapilo wa buimana. "
-                "Alaba lipuzo le ka Silozi se si nepahezi, se si nolofetse, ni se si na ni bupilo:\n\n"
-            )
-        elif lang == "bemba":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndi kapyunga wa buumi bwa bana. "
-                "Yasuka ilipusho lyi mu Chibemba icasalangana, icapepa, na icali na ubusuma bwa buumi:\n\n"
-            )
-        elif lang == "tonga":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndi mweenzinyina wa buumi bwa kubaa mwana. "
-                "Mupandule mwaambo wu mu Chitonga chakweelela, chiswiipe, komanso chili a cibelesyo ca buumi:\n\n"
-            )
-        else:
-            instruction = (
-                f"{lang_enforce}\n"
-                "You are a maternal health assistant. "
-                "Answer the following question clearly, simply, and with accurate health information:\n\n"
-            )
-
-        response = convo.send_message(instruction + question)
-
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        response = gemini_model.generate_content(prompt)
         try:
             text = response.text
             if text and text.strip():
                 return text.strip()
         except (ValueError, AttributeError) as ve:
-            logging.warning(f"[Gemini ask] Blocked/empty response lang={lang}: {ve}")
-
-        fallback_map = {
-            "shona": "Ndine urombo, handina kuwana mhinduro.",
-            "ndebele": "Uxolo, angikutholanga impendulo.",
-            "chinyanja": "Pepani, sindinapeze yankho.",
-            "tonga": "Ndatola, tana kuwana yankho.",
-            "bemba": "Natapa, nshasangile ilyasuko.",
-            "lozi": "Ni maswabi, ha ni fumani karabo.",
-        }
-        return fallback_map.get(lang, "Sorry, I could not find an answer.")
-
+            logging.warning(f"[ask_gemini] Blocked/empty lang={lang}: {ve}")
+        return fallback
     except Exception as e:
-        logging.error(f"[Gemini Error] {type(e).__name__}: {e}")
-        fallback_map = {
-            "shona": "Pane dambudziko pakupindura mubvunzo wako.",
-            "ndebele": "Kunenkinga ekuphenduleni umbuzo wakho.",
-            "chinyanja": "Pali vuto popanga yankho la funso lanu.",
-            "tonga": "Kwakali zyuuno mu kupandula mwaambo wako.",
-            "bemba": "Kuli ubukopo mu kuyasuka ilipusho lyobe.",
-            "lozi": "Ku na bothata ka ku arabela lipuzo la hao.",
-        }
-        return fallback_map.get(lang, "Sorry, there was a problem getting an answer.")
+        logging.error(f"[ask_gemini Error] {type(e).__name__}: {e}")
+        return fallback
 
 
 def ask_gemini_cancer(question: str, lang: str = "english") -> str:
-    # ── FIX: prepend a strict language instruction ──
-    lang_enforce = {
-        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
-        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
-        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
-        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
-        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
-        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
-    }.get(lang, "Respond in English only.")
+    """
+    Cervical cancer Gemini call.
+    FIX: uses stateless generate_content (no shared chat history).
+    FIX: language enforce instruction placed at END of prompt.
+    """
+    lang_enforce = _get_lang_enforce(lang)
+    fallback = _get_fallback(lang)
+
+    instruction_body = {
+        "shona": (
+            "Uri mubatsiri wezvehutano hwegomarara rechibereko. "
+            "Pindura mubvunzo uyu muShona yakajeka uye yakapfava:\n\n"
+        ),
+        "ndebele": (
+            "Ungumsizi wezempilo yomhlaza wesibeletho. "
+            "Phendula lo mbuzo ngesiNdebele esicacile futhi esilula:\n\n"
+        ),
+        "chinyanja": (
+            "Ndine mphungu wa thanzi la kansa ya chibereko. "
+            "Yankhani funso ili mu Chinyanja momveka bwino komanso mwaulemu:\n\n"
+        ),
+        "lozi": (
+            "Ki muthusi wa za kansa ya mulomo wa sibeleko. "
+            "Alaba lipuzo le ka Silozi se si bonahala hande ni se si nolofetse:\n\n"
+        ),
+        "bemba": (
+            "Ndi kapyunga wa kansa ya cibeleshi. "
+            "Yasuka ilipusho lyi mu Chibemba icamoneka bwino kabili icapepuka:\n\n"
+        ),
+        "tonga": (
+            "Ndi mweenzinyina wa kansa ya mulomo wa cibeleko. "
+            "Mupandule mwaambo wu mu Chitonga chakweelela alimwi chiswiipe:\n\n"
+        ),
+    }.get(lang, (
+        "You are a cervical cancer health assistant. "
+        "Answer the following question clearly and simply in English:\n\n"
+    ))
+
+    # FIX: language enforcement moved to END of prompt
+    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
     try:
-        if lang == "shona":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Iwe uri mubatsiri wezvehutano hwegomarara rechibereko. "
-                "Pindura mubvunzo uyu muShona yakajeka uye yakapfava:\n\n"
-            )
-        elif lang == "ndebele":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ungumsizi wezempilo yomhlaza wesibeletho. "
-                "Phendula lo mbuzo ngesiNdebele esicacile futhi esilula:\n\n"
-            )
-        elif lang == "chinyanja":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndine mphungu wa thanzi la kansa ya chibereko. "
-                "Yankhani funso ili mu Chinyanja momveka bwino komanso mwaulemu:\n\n"
-            )
-        elif lang == "lozi":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ki muthusi wa za kansa ya mulomo wa sibeleko. "
-                "Alaba lipuzo le ka Silozi se si bonahala hande ni se si nolofetse:\n\n"
-            )
-        elif lang == "bemba":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndi kapyunga wa kansa ya cibeleshi. "
-                "Yasuka ilipusho lyi mu Chibemba icamoneka bwino kabili icapepuka:\n\n"
-            )
-        elif lang == "tonga":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndi mweenzinyina wa kansa ya mulomo wa cibeleko. "
-                "Mupandule mwaambo wu mu Chitonga chakweelela alimwi chiswiipe:\n\n"
-            )
-        else:
-            instruction = (
-                f"{lang_enforce}\n"
-                "You are a cervical cancer health assistant. "
-                "Answer the following question clearly and simply in English:\n\n"
-            )
-
-        response = convo.send_message(instruction + question)
-
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        response = gemini_model.generate_content(prompt)
         try:
             text = response.text
             if text and text.strip():
                 return text.strip()
         except (ValueError, AttributeError) as ve:
-            logging.warning(f"[Gemini cancer] Blocked/empty response lang={lang}: {ve}")
-
-        fallback_map = {
-            "shona": "Ndine hurombo, handina kuwana mhinduro.",
-            "ndebele": "Uxolo, angikutholanga impendulo.",
-            "chinyanja": "Pepani, sindinapeze yankho.",
-            "tonga": "Ndatola, tana kuwana yankho.",
-            "bemba": "Natapa, nshasangile ilyasuko.",
-            "lozi": "Ni maswabi, ha ni fumani karabo.",
-        }
-        return fallback_map.get(lang, "Sorry, I could not find an answer.")
-
+            logging.warning(f"[ask_gemini_cancer] Blocked/empty lang={lang}: {ve}")
+        return fallback
     except Exception as e:
-        logging.error(f"[Gemini Cancer Error] {type(e).__name__}: {e}")
-        fallback_map = {
-            "shona": "Pane dambudziko pakupindura mubvunzo wako.",
-            "ndebele": "Kunenkinga ekuphenduleni umbuzo wakho.",
-            "chinyanja": "Pali vuto popanga yankho la funso lanu.",
-            "tonga": "Kwakali zyuuno mu kupandula mwaambo wako.",
-            "bemba": "Kuli ubukopo mu kuyasuka ilipusho lyobe.",
-            "lozi": "Ku na bothata ka ku arabela lipuzo la hao.",
-        }
-        return fallback_map.get(lang, "Sorry, there was a problem getting an answer.")
+        logging.error(f"[ask_gemini_cancer Error] {type(e).__name__}: {e}")
+        return fallback
 
 
 def ask_gemini_general(question: str, lang: str) -> str:
-    """Call Gemini and always reply in the correct language."""
-
-    lang_enforce = {
-        "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
-        "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
-        "chinyanja": "Yankhani mu Chichewa/Chinyanja basi. Osagwiritsa ntchito Chingerezi.",
-        "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
-        "bemba":     "Yasuka mu Chibemba fye. Ushatumishe Cingeleshi.",
-        "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
-    }.get(lang, "Respond in English only.")
-
-    fallback_map = {
-        "shona":     "Pane dambudziko pakupindura mubvunzo wako. Ndapota edza zvakare.",
-        "ndebele":   "Kunenkinga ekuphenduleni umbuzo wakho. Zama futhi.",
-        "chinyanja": "Pali vuto popanga yankho. Chonde yesani mwachiwiri.",
-        "lozi":      "Ku na bothata ka ku arabela lipuzo la hao. Lika hape.",
-        "bemba":     "Kuli ubukopo mu kuyasuka ilipusho lyobe. Esheni futi.",
-        "tonga":     "Kwakali zyuuno mu kupandula mwaambo wako. Lingenya kabili.",
-    }
-    fallback = fallback_map.get(lang, "Sorry, there was a problem answering your question. Please try again.")
+    """
+    General Gemini call.
+    FIX: uses stateless generate_content (no shared chat history).
+    FIX: language enforce instruction placed at END of prompt.
+    """
+    lang_enforce = _get_lang_enforce(lang)
+    fallback = _get_fallback(lang)
 
     company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
     company_email   = "hello@dawa-health.com"
     company_website = "https://dawa-health.com/"
     company_phone   = "+260 977 985 063"
 
-    lang_instructions = {
+    instruction_body = {
         "shona": (
-            lang_enforce + "\n"
             "Uri mubatsiri wezvehutano ane hunyanzvi muhutano hwevakadzi vane pamuviri uye gomarara remuromo wechibereko. "
             "Pindura mubvunzo wemushandisi uchishandisa ruzivo rwechokwadi. "
             "USATANGE nemitsara yakaita sekuti Zvakanaka, Hongu, Hezvino. "
@@ -1939,7 +1847,6 @@ def ask_gemini_general(question: str, lang: str) -> str:
             "Pedzisa nekuyambira kupfupi kunoti ruzivo urwu harutsivi kuongororwa nachiremba.\n\n"
         ),
         "ndebele": (
-            lang_enforce + "\n"
             "Ungumsizi wezempilo ochwepheshile ogxile kwezempilo yabomama abakhulelweyo kanye lomdlavuza womlomo wesibeletho. "
             "Phendula umbuzo womsebenzisi usebenzisa ulwazi lwezempilo oluqondileyo. "
             "UNGAKALI ngemisho efana lokuthi Kulungile, Yebo, Nakhu. "
@@ -1947,7 +1854,6 @@ def ask_gemini_general(question: str, lang: str) -> str:
             "Qedisa ngesexwayiso esifitshane esithi ulwazi lolu aluthathi indawo yokuhlolwa ngudokotela.\n\n"
         ),
         "chinyanja": (
-            lang_enforce + "\n"
             "Ndinu mthandizi wa zaumoyo wa akatswiri pa zaumoyo wa amayi apakati komanso khansa ya chiberekero. "
             "Yankhani funso la wogwiritsa ntchito pogwiritsa ntchito chidziwitso cholondola. "
             "MUSAYAMBE ndi mawu ngati Chabwino, Inde, Nazi. "
@@ -1955,27 +1861,21 @@ def ask_gemini_general(question: str, lang: str) -> str:
             "Malizitsani ndi chenjezo chachidule chonena kuti chidziwitsochi sichimalowa m'malo mwa kuyezetsa kwa dokotala.\n\n"
         ),
         "tonga": (
-            lang_enforce + "\n"
             "Muli mweenzinyina wa buumi mu buumi bwa banakazi abali mu buumi bwa kubusya mwana alimwi ne ndenda ya mulomo wa cibeleko. "
             "Tangi mpoonya mpoonyo ku mpendulo. "
             "Malizya a kusinsimuna kufwaafwi kuti ulwazi ulu talusanduki ku lwandano lwa dokotela.\n\n"
         ),
         "bemba": (
-            lang_enforce + "\n"
             "Uli kapyunga wa buumi uwashintilila pa buumi bwa banakashi abali ne fumo pamo ne kansa ya mulomo wa cibeleshi. "
             "Tambilila ku lyasuko mwachindunji. "
             "Pwishisheni ne cilembelo cipepa icilelanda ati ubu busuma tabusendapo icifulo ca kuyeshiwa kuli dokota.\n\n"
         ),
         "lozi": (
-            lang_enforce + "\n"
             "Mu muthusi wa za mapilo wa bucwani ya iketile hahulu ku mapilo a basali baimana ni kankere ya mulomo wa sibeleko. "
             "Qalisa hanghang ka karabo. "
             "Felelisa ka temoso ye nyinyani ye e re ziboho ze ha zi nkeleli sibaka sa ku lekolwa ki dokota.\n\n"
         ),
-    }
-
-    instruction = lang_instructions.get(lang, (
-        lang_enforce + "\n"
+    }.get(lang, (
         "You are a professional health assistant specializing in maternal health and cervical cancer for Dawa Health. "
         "Answer the user question using correct and evidence-based health information. "
         "DO NOT start with phrases like Okay, Sure, or Let me explain. "
@@ -1985,28 +1885,30 @@ def ask_gemini_general(question: str, lang: str) -> str:
         f"Contact: email={company_email}, phone={company_phone}, address={company_address}, website={company_website}.\n\n"
     ))
 
-    try:
-        gemini_model = genai.GenerativeModel("gemini-2.5-flash")
-        response = gemini_model.generate_content(instruction + question)
+    # FIX: language enforcement moved to END of prompt
+    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
-        # Safely extract text — response.text raises ValueError when content is blocked
+    try:
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        response = gemini_model.generate_content(prompt)
         try:
             text = response.text
             if text and text.strip():
                 return text.strip()
         except (ValueError, AttributeError) as ve:
-            logging.warning(f"[Gemini] Blocked/empty response lang={lang}: {ve}")
+            logging.warning(f"[ask_gemini_general] Blocked/empty lang={lang}: {ve}")
             try:
                 finish = response.candidates[0].finish_reason
-                logging.warning(f"[Gemini] Finish reason: {finish}")
+                logging.warning(f"[ask_gemini_general] Finish reason: {finish}")
             except Exception:
                 pass
-            return fallback
-
         return fallback
-
     except Exception as e:
-        logging.error(f"[Gemini General Error] {type(e).__name__}: {e}")
+        logging.error(f"[ask_gemini_general Error] {type(e).__name__}: {e}")
         return fallback
 
 
@@ -2086,7 +1988,6 @@ def handle_ask_week(sender, prompt, phone_id):
                         if pattern in info_text:
                             start_idx = info_text.find(pattern)
                             end_idx = min(start_idx + 2000, len(info_text))
-                            section = info_text[start_idx:end_idx]
                             next_week = min([info_text.find(f"Week {w}", start_idx + 10) for w in range(week_num + 1, 41) if info_text.find(f"Week {w}", start_idx + 10) != -1] or [end_idx])
                             section = info_text[start_idx:next_week].strip()
                             send(f"Ulwazi lwe Iviki {week_num}:\n\n{section}", sender, phone_id)
@@ -2101,8 +2002,7 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Sabata {week_num}:.*?(?=\*Sabata {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Zambiri za *Sabata {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Zambiri za *Sabata {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Pepani, sindinapeze zambiri za sabata {week_num}. Yesani sabata lina kuchokera pa 1 mpaka 40.", sender, phone_id)
@@ -2111,8 +2011,7 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Vhiki {week_num}:.*?(?=\*Vhiki {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Ruzivo rwe *Vhiki {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Ruzivo rwe *Vhiki {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Ndine urombo, handina kuwana ruzivo rwevhiki {week_num}. Edza imwe vhiki kubva pa 1 kusvika pa 40.", sender, phone_id)
@@ -2121,8 +2020,7 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Sunda {week_num}:.*?(?=\*Sunda {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Liziba la *Sunda {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Liziba la *Sunda {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Ni maswabi, ha ni a fumana liziba la vhiki {week_num}. Linge sunda ye n'wi ku zwana 1 ku ya ku 40.", sender, phone_id)
@@ -2131,8 +2029,7 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Umulungu {week_num}:.*?(?=\*Umulungu {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Icibeela ca *Mulungu {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Icibeela ca *Mulungu {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Natapa, nshasangile icibeela ca mulungu {week_num}. Esheni mulungu ubi ku 1 ukufika ku 40.", sender, phone_id)
@@ -2141,8 +2038,7 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Nhwiiiki {week_num}:.*?(?=\*Nhwiiiki {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Cibeela ca *Nhwiiiki {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Cibeela ca *Nhwiiiki {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Ndatola, tana kuwana cibeela ca nhwiiiki {week_num}. Lingenya vhiki linzwi kuzwa 1 kusika 40.", sender, phone_id)
@@ -2151,43 +2047,32 @@ def handle_ask_week(sender, prompt, phone_id):
                 pattern = rf"\*Week {week_num}:.*?(?=\*Week {week_num+1}:|\*Question|\Z)"
                 match = re.search(pattern, info_text, re.S | re.I)
                 if match:
-                    week_info = match.group(0).strip()
-                    send(f"Here's information for *Week {week_num}:*\n\n{week_info}", sender, phone_id)
+                    send(f"Here's information for *Week {week_num}:*\n\n{match.group(0).strip()}", sender, phone_id)
                     ask_another_week(sender, phone_id)
                 else:
                     send(f"Sorry, I couldn't find information for week {week_num}. Please try another week from 1 to 40.", sender, phone_id)
         
         else:
-            if lang == "shona":
-                send("Ndapota isa vhiki kubva pa 1 kusvika pa 40 chete.", sender, phone_id)
-            elif lang == "ndebele":
-                send("Sicela ufake iviki eliphakathi kuka-1 no-40 kuphela.", sender, phone_id)
-            elif lang == "bemba":
-                send("Napapita, ingisha mulungu ukufuma pa 1 ukufika pa 40 fye.", sender, phone_id)
-            elif lang == "chinyanja":
-                send("Chonde lowetsani sabata kuyambira pa 1 mpaka pa 40 basi.", sender, phone_id)
-            elif lang == "tonga":
-                send("Ndatola, ingila vhiki kuzwa 1 kusika 40 pe.", sender, phone_id)
-            elif lang == "lozi":
-                send("Ndapota, kenisa vhiki ku zwana 1 ku ya ku 40 feela.", sender, phone_id)
-            else:
-                send("Please enter a week between 1 and 40 only.", sender, phone_id)
+            range_map = {
+                "shona": "Ndapota isa vhiki kubva pa 1 kusvika pa 40 chete.",
+                "ndebele": "Sicela ufake iviki eliphakathi kuka-1 no-40 kuphela.",
+                "bemba": "Napapita, ingisha mulungu ukufuma pa 1 ukufika pa 40 fye.",
+                "chinyanja": "Chonde lowetsani sabata kuyambira pa 1 mpaka pa 40 basi.",
+                "tonga": "Ndatola, ingila vhiki kuzwa 1 kusika 40 pe.",
+                "lozi": "Ndapota, kenisa vhiki ku zwana 1 ku ya ku 40 feela.",
+            }
+            send(range_map.get(lang, "Please enter a week between 1 and 40 only."), sender, phone_id)
             
     except ValueError:
-        if lang == "shona":
-            send("Ndapota isa vhiki kubva pa 1 kusvika pa 40 chete.", sender, phone_id)
-        elif lang == "ndebele":
-            send("Sicela ufake iviki eliphakathi kuka-1 no-40 kuphela.", sender, phone_id)
-        elif lang == "bemba":
-            send("Napapita, ingisha mulungu ukufuma pa 1 ukufika pa 40 fye.", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Chonde lowetsani sabata kuyambira pa 1 mpaka pa 40 basi.", sender, phone_id)
-        elif lang == "tonga":
-            send("Ndatola, ingila vhiki kuzwa 1 kusika 40 pe.", sender, phone_id)
-        elif lang == "lozi":
-            send("Ndapota, kenisa vhiki ku zwana 1 ku ya ku 40 feela.", sender, phone_id)
-        else:
-            send("Please enter a week between 1 and 40 only.", sender, phone_id)
+        range_map = {
+            "shona": "Ndapota isa vhiki kubva pa 1 kusvika pa 40 chete.",
+            "ndebele": "Sicela ufake iviki eliphakathi kuka-1 no-40 kuphela.",
+            "bemba": "Napapita, ingisha mulungu ukufuma pa 1 ukufika pa 40 fye.",
+            "chinyanja": "Chonde lowetsani sabata kuyambira pa 1 mpaka pa 40 basi.",
+            "tonga": "Ndatola, ingila vhiki kuzwa 1 kusika 40 pe.",
+            "lozi": "Ndapota, kenisa vhiki ku zwana 1 ku ya ku 40 feela.",
+        }
+        send(range_map.get(lang, "Please enter a week between 1 and 40 only."), sender, phone_id)
             
 
 @app.route("/", methods=["GET"])
@@ -2226,13 +2111,12 @@ def webhook():
                                             prompt = message["text"]["body"]
                                             logging.info(f"Processing message from {sender}: {prompt}")
                                             
-                                            # ── Ensure state exists ──
+                                            # Ensure state exists
                                             is_new = ensure_user_state(sender)
                                             if not is_new:
                                                 user_states[sender]["first_message"] = False
 
-                                            # ── FIX: Re-detect language on every message
-                                            # (skip during first-time language detection & registration)
+                                            # FIX: Re-detect language on every message
                                             maybe_update_language(sender, prompt)
                                             
                                             save_user_conversation(sender, "user", prompt)
@@ -2243,20 +2127,15 @@ def webhook():
                                             ensure_user_state(sender)
                                             state = user_states.get(sender, {})
                                             lang = state.get("language", "english")
-                                            if lang == "shona":
-                                                send("Ndine urombo, handigoni kugamuchira mameseji asiri mavara chete. Ndapota tumira meseji yemavara.", sender, phone_id)
-                                            elif lang == "ndebele":
-                                                send("Uxolo, angikwazi ukwamukela imilayezo engeyona imibhalo kuphela. Sicela uthumele umlayezo wombhalo.", sender, phone_id)
-                                            elif lang == "bemba":
-                                                send("Natapa, nshakwanishe ukupokeela amameseji yambi ukucila pa menso. Napapita, tuma ubutumwa bwamenso.", sender, phone_id)
-                                            elif lang == "chinyanja":
-                                                send("Pepani, sindingathe kulandira mameseji enama osati a zilembo. Chonde tumirani meseji ya zilembo.", sender, phone_id)
-                                            elif lang == "tonga":
-                                                send("Ndazwa kwiinda, tani konzy kujana mameseji aambi kusikwa aa mabbala. Ndatola, tuma meseji ya mabbala.", sender, phone_id)
-                                            elif lang == "lozi":
-                                                send("Ni maswabi, ha na kona kuzwela miiala yeng'wi kufita feela ya mangolo. Ndapota, lumeza molaala wa mangolo.", sender, phone_id)
-                                            else:
-                                                send("Sorry, I can only process text messages. Please send a text message.", sender, phone_id)
+                                            non_text_map = {
+                                                "shona": "Ndine urombo, handigoni kugamuchira mameseji asiri mavara chete. Ndapota tumira meseji yemavara.",
+                                                "ndebele": "Uxolo, angikwazi ukwamukela imilayezo engeyona imibhalo kuphela. Sicela uthumele umlayezo wombhalo.",
+                                                "bemba": "Natapa, nshakwanishe ukupokeela amameseji yambi ukucila pa menso. Napapita, tuma ubutumwa bwamenso.",
+                                                "chinyanja": "Pepani, sindingathe kulandira mameseji enama osati a zilembo. Chonde tumirani meseji ya zilembo.",
+                                                "tonga": "Ndazwa kwiinda, tani konzy kujana mameseji aambi kusikwa aa mabbala. Ndatola, tuma meseji ya mabbala.",
+                                                "lozi": "Ni maswabi, ha na kona kuzwela miiala yeng'wi kufita feela ya mangolo. Ndapota, lumeza molaala wa mangolo.",
+                                            }
+                                            send(non_text_map.get(lang, "Sorry, I can only process text messages. Please send a text message."), sender, phone_id)
                                 
                                 elif "statuses" in value:
                                     logging.info("Message status update received, ignoring.")
