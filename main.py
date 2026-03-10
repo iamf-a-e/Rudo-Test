@@ -232,7 +232,11 @@ def detect_language(message, sender=None):
             "ngati", "kuti", "ndipo", "kupita", "ayi", "palibe", "ndithu", "kodi",
             "kusuta", "kumawononga", "amene", "ndikumuyembekezera", "sabata", "zambiri",
             "funso", "masabata", "thanzo", "zinthu", "mavitamini", "zoyezera", "liti",
-            "lotani", "monga", "mwanj", "pamene", "panopa", "pang'ono", "pamwamba"
+            "lotani", "monga", "mwanj", "pamene", "panopa", "pang'ono", "pamwamba",
+            "nitandizeni", "nankani", "vumo", "mimba", "mwana", "thupi", "pathupi",
+            "tilandira", "thandizani", "muzindikire", "muzindikiri", "ndimva", "ndikumva",
+            "ndinafuna", "sindikumva", "ndiri ndi", "ine", "iwe", "ife", "inu", "iwo",
+            "ndimakhala", "ndimafuna", "zimenezi", "zimenezizi", "chonchi", "chomwe"
         ],
         "lozi": [
             "mwa bona", "mwa amukelwa", "uli bwanji", "ee", "ndalumba", "ndapota",
@@ -547,6 +551,17 @@ def handle_follow_up(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
+    # FIX: intercept greetings before Gemini fallback
+    greeting_words = ["hi","hello","hey","hie","mhoro","mhoroi","sawubona","salibonani","moni","muli bwanji","mwabuka buti","mwaiseni","muli shani","mwa bona"]
+    if any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words):
+        reset_conversation(sender)
+        state = user_states[sender]
+        lang = state["language"]
+        greet_map = {"shona":"Mhoroi! Ndingakubatsirei nhasi?","ndebele":"Sawubona! Ngingakusiza ngani namuhla?","chinyanja":"Moni! Ndingakuthandizireni lero?","lozi":"Mwa bona! Nka ku thusa ka mini sunu?","tonga":"Moni! Ndingamwafwa shani ilelo?","bemba":"Muli shani! Bushe kuti namwafwa shani lelo?"}
+        send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
+        save_single_user_state(sender)
+        return
+
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "cha", "ayi"]
 
     if any(response in prompt_lower for response in no_responses):
@@ -588,14 +603,21 @@ def handle_follow_up(sender, prompt, phone_id):
         return
 
     else:
-        if lang == "shona":
-            send("Ndiri kufunga...", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyacabangisisa...", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Ndikuganiza...", sender, phone_id)
-        else:
-            send("Let me think...", sender, phone_id)
+        if len(prompt_lower.split()) > 2:
+            if lang == "shona":
+                send("Ndiri kufunga...", sender, phone_id)
+            elif lang == "ndebele":
+                send("Ngiyacabangisisa...", sender, phone_id)
+            elif lang == "chinyanja":
+                send("Ndikuganiza...", sender, phone_id)
+            elif lang == "tonga":
+                send("Ndikuganizira...", sender, phone_id)
+            elif lang == "bemba":
+                send("Ndikufwailisha...", sender, phone_id)
+            elif lang == "lozi":
+                send("Ni nahana...", sender, phone_id)
+            else:
+                send("Let me think...", sender, phone_id)
 
         reply = ask_gemini_general(prompt, lang)
         send(reply, sender, phone_id)
@@ -628,8 +650,42 @@ def handle_general_followup(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
+    # ── FIX: intercept greetings and resets BEFORE doing anything else ──
+    greeting_words = [
+        "hi", "hello", "hey", "hie",
+        "mhoro", "mhoroi", "sawubona", "salibonani",
+        "moni", "muli bwanji", "mwabuka buti", "mwalandwa buti",
+        "mwaiseni", "muli shani", "mwa bona"
+    ]
+    reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
+
+    is_greeting = any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words)
+    is_reset    = any(kw in prompt_lower for kw in reset_keywords)
+
+    if is_greeting or is_reset:
+        reset_conversation(sender)
+        state = user_states[sender]
+        lang  = state["language"]
+        if lang == "shona":
+            send("Mhoroi! Ndingakubatsirei nhasi?", sender, phone_id)
+        elif lang == "ndebele":
+            send("Sawubona! Ngingakusiza ngani namuhla?", sender, phone_id)
+        elif lang == "chinyanja":
+            send("Moni! Ndingakuthandizireni lero?", sender, phone_id)
+        elif lang == "lozi":
+            send("Mwa bona! Nka ku thusa ka mini sunu?", sender, phone_id)
+        elif lang == "tonga":
+            send("Moni! Ndingamwafwa shani ilelo?", sender, phone_id)
+        elif lang == "bemba":
+            send("Muli shani! Bushe kuti namwafwa shani lelo?", sender, phone_id)
+        else:
+            send("Hello! How can I help you today?", sender, phone_id)
+        save_single_user_state(sender)
+        return
+    # ────────────────────────────────────────────────────────────────────
+
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "inde"]
-    no_responses = ["no", "nah", "aiwa", "kwete", "hapana", "nope"]
+    no_responses  = ["no", "nah", "aiwa", "kwete", "hapana", "nope", "cha", "ayi"]
 
     if any(r in prompt_lower for r in yes_responses):
         if lang == "shona":
@@ -654,20 +710,38 @@ def handle_general_followup(sender, prompt, phone_id):
     if any(r in prompt_lower for r in no_responses):
         if lang == "shona":
             send("Ndatenda! Iva nezuva rakanaka.", sender, phone_id)
+        elif lang == "ndebele":
+            send("Ngiyabonga! Ube nosuku oluhle.", sender, phone_id)
+        elif lang == "chinyanja":
+            send("Zikomo! Khalani ndi tsiku labwino.", sender, phone_id)
+        elif lang == "tonga":
+            send("Twatotela! Mube abusiku bwabwino.", sender, phone_id)
+        elif lang == "bemba":
+            send("Natotela! Mubelele bwino.", sender, phone_id)
+        elif lang == "lozi":
+            send("Ndalumba! Mube ni lizazi le linde.", sender, phone_id)
         else:
             send("Thank you! Have a good day.", sender, phone_id)
 
         reset_conversation(sender)
         return
 
-    if lang == "shona":
-        send("Ndiri kufunga...", sender, phone_id)
-    elif lang == "ndebele":
-        send("Ngiyacabangisisa...", sender, phone_id)
-    elif lang == "chinyanja":
-        send("Ndikuganiza...", sender, phone_id)
-    else:
-        send("Let me think...", sender, phone_id)
+    # Only show "thinking" indicator for genuine content questions, not short phrases
+    if len(prompt_lower.split()) > 2:
+        if lang == "shona":
+            send("Ndiri kufunga...", sender, phone_id)
+        elif lang == "ndebele":
+            send("Ngiyacabangisisa...", sender, phone_id)
+        elif lang == "chinyanja":
+            send("Ndikuganiza...", sender, phone_id)
+        elif lang == "tonga":
+            send("Ndikuganizira...", sender, phone_id)
+        elif lang == "bemba":
+            send("Ndikufwailisha...", sender, phone_id)
+        elif lang == "lozi":
+            send("Ni nahana...", sender, phone_id)
+        else:
+            send("Let me think...", sender, phone_id)
 
     reply = ask_gemini_general(prompt, lang)
     send(reply, sender, phone_id)
