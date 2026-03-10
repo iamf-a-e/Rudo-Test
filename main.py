@@ -170,7 +170,16 @@ def get_user_conversation(sender):
     if redis_client:
         try:
             history = redis_client.get(f"conversation:{sender}")
-            return json.loads(history) if history else []
+            if not history:
+                return []
+            # Upstash may return an already-decoded list, or a raw JSON string
+            if isinstance(history, list):
+                return history
+            if isinstance(history, str):
+                parsed = json.loads(history)
+                if isinstance(parsed, list):
+                    return parsed
+            return []
         except Exception as e:
             logging.error(f"Error getting conversation: {e}")
             return []
@@ -181,9 +190,11 @@ def save_user_conversation(sender, role, message):
     if redis_client:
         try:
             conversation = get_user_conversation(sender)
+            if not isinstance(conversation, list):
+                conversation = []
             conversation.append({
                 "role": role,
-                "message": message,
+                "message": str(message),
                 "timestamp": datetime.now().isoformat()
             })
             if len(conversation) > 100:
@@ -1788,24 +1799,34 @@ def ask_gemini(question: str, lang: str = "english") -> str:
 
         response = convo.send_message(instruction + question)
 
-        if hasattr(response, "text") and response.text:
-            return response.text.strip()
-        else:
-            return (
-                "Ndine urombo, handina kuwana mhinduro." if lang == "shona"
-                else "Uxolo, angikutholanga impendulo." if lang == "ndebele"
-                else "Pepani, sindinapeze yankho." if lang == "chinyanja"
-                else "Sorry, I couldn't find an answer."
-            )
+        try:
+            text = response.text
+            if text and text.strip():
+                return text.strip()
+        except (ValueError, AttributeError) as ve:
+            logging.warning(f"[Gemini ask] Blocked/empty response lang={lang}: {ve}")
+
+        fallback_map = {
+            "shona": "Ndine urombo, handina kuwana mhinduro.",
+            "ndebele": "Uxolo, angikutholanga impendulo.",
+            "chinyanja": "Pepani, sindinapeze yankho.",
+            "tonga": "Ndatola, tana kuwana yankho.",
+            "bemba": "Natapa, nshasangile ilyasuko.",
+            "lozi": "Ni maswabi, ha ni fumani karabo.",
+        }
+        return fallback_map.get(lang, "Sorry, I could not find an answer.")
 
     except Exception as e:
-        print(f"[Gemini Error] {e}")
-        return (
-            "Pane dambudziko pakupindura mubvunzo wako." if lang == "shona"
-            else "Kunenkinga ekuphenduleni umbuzo wakho." if lang == "ndebele"
-            else "Pali vuto popanga yankho la funso lanu." if lang == "chinyanja"
-            else "Sorry, there was a problem getting an answer."
-        )
+        logging.error(f"[Gemini Error] {type(e).__name__}: {e}")
+        fallback_map = {
+            "shona": "Pane dambudziko pakupindura mubvunzo wako.",
+            "ndebele": "Kunenkinga ekuphenduleni umbuzo wakho.",
+            "chinyanja": "Pali vuto popanga yankho la funso lanu.",
+            "tonga": "Kwakali zyuuno mu kupandula mwaambo wako.",
+            "bemba": "Kuli ubukopo mu kuyasuka ilipusho lyobe.",
+            "lozi": "Ku na bothata ka ku arabela lipuzo la hao.",
+        }
+        return fallback_map.get(lang, "Sorry, there was a problem getting an answer.")
 
 
 def ask_gemini_cancer(question: str, lang: str = "english") -> str:
@@ -1865,29 +1886,39 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
 
         response = convo.send_message(instruction + question)
 
-        if hasattr(response, "text") and response.text:
-            return response.text.strip()
-        else:
-            return (
-                "Ndine hurombo, handina kuwana mhinduro." if lang == "shona"
-                else "Uxolo, angikutholanga impendulo." if lang == "ndebele"
-                else "Pepani, sindinapeze yankho." if lang == "chinyanja"
-                else "Sorry, I couldn't find an answer."
-            )
+        try:
+            text = response.text
+            if text and text.strip():
+                return text.strip()
+        except (ValueError, AttributeError) as ve:
+            logging.warning(f"[Gemini cancer] Blocked/empty response lang={lang}: {ve}")
+
+        fallback_map = {
+            "shona": "Ndine hurombo, handina kuwana mhinduro.",
+            "ndebele": "Uxolo, angikutholanga impendulo.",
+            "chinyanja": "Pepani, sindinapeze yankho.",
+            "tonga": "Ndatola, tana kuwana yankho.",
+            "bemba": "Natapa, nshasangile ilyasuko.",
+            "lozi": "Ni maswabi, ha ni fumani karabo.",
+        }
+        return fallback_map.get(lang, "Sorry, I could not find an answer.")
 
     except Exception as e:
-        print(f"[Gemini Error] {e}")
         logging.error(f"[Gemini Cancer Error] {type(e).__name__}: {e}")
-        return (
-            "Pane dambudziko pakupindura mubvunzo wako." if lang == "shona"
-            else "Kunenkinga ekuphenduleni umbuzo wakho." if lang == "ndebele"
-            else "Pali vuto popanga yankho la funso lanu." if lang == "chinyanja"
-            else "Sorry, there was a problem getting an answer."
-        )
+        fallback_map = {
+            "shona": "Pane dambudziko pakupindura mubvunzo wako.",
+            "ndebele": "Kunenkinga ekuphenduleni umbuzo wakho.",
+            "chinyanja": "Pali vuto popanga yankho la funso lanu.",
+            "tonga": "Kwakali zyuuno mu kupandula mwaambo wako.",
+            "bemba": "Kuli ubukopo mu kuyasuka ilipusho lyobe.",
+            "lozi": "Ku na bothata ka ku arabela lipuzo la hao.",
+        }
+        return fallback_map.get(lang, "Sorry, there was a problem getting an answer.")
 
 
 def ask_gemini_general(question: str, lang: str) -> str:
-    # ── FIX: always enforce the correct response language ──
+    """Call Gemini and always reply in the correct language."""
+
     lang_enforce = {
         "shona":     "Pindura muchiShona chete. Usashandise Chirungu.",
         "ndebele":   "Phendula ngesiNdebele kuphela. Ungasebenzisi isiNgisi.",
@@ -1897,107 +1928,100 @@ def ask_gemini_general(question: str, lang: str) -> str:
         "tonga":     "Mupandule mu Chitonga chete. Musagwisye Ciingelezi.",
     }.get(lang, "Respond in English only.")
 
+    fallback_map = {
+        "shona":     "Pane dambudziko pakupindura mubvunzo wako. Ndapota edza zvakare.",
+        "ndebele":   "Kunenkinga ekuphenduleni umbuzo wakho. Zama futhi.",
+        "chinyanja": "Pali vuto popanga yankho. Chonde yesani mwachiwiri.",
+        "lozi":      "Ku na bothata ka ku arabela lipuzo la hao. Lika hape.",
+        "bemba":     "Kuli ubukopo mu kuyasuka ilipusho lyobe. Esheni futi.",
+        "tonga":     "Kwakali zyuuno mu kupandula mwaambo wako. Lingenya kabili.",
+    }
+    fallback = fallback_map.get(lang, "Sorry, there was a problem answering your question. Please try again.")
+
+    company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
+    company_email   = "hello@dawa-health.com"
+    company_website = "https://dawa-health.com/"
+    company_phone   = "+260 977 985 063"
+
+    lang_instructions = {
+        "shona": (
+            lang_enforce + "\n"
+            "Uri mubatsiri wezvehutano ane hunyanzvi muhutano hwevakadzi vane pamuviri uye gomarara remuromo wechibereko. "
+            "Pindura mubvunzo wemushandisi uchishandisa ruzivo rwechokwadi. "
+            "USATANGE nemitsara yakaita sekuti Zvakanaka, Hongu, Hezvino. "
+            "Tanga zvakananga nemhinduro. "
+            "Pedzisa nekuyambira kupfupi kunoti ruzivo urwu harutsivi kuongororwa nachiremba.\n\n"
+        ),
+        "ndebele": (
+            lang_enforce + "\n"
+            "Ungumsizi wezempilo ochwepheshile ogxile kwezempilo yabomama abakhulelweyo kanye lomdlavuza womlomo wesibeletho. "
+            "Phendula umbuzo womsebenzisi usebenzisa ulwazi lwezempilo oluqondileyo. "
+            "UNGAKALI ngemisho efana lokuthi Kulungile, Yebo, Nakhu. "
+            "Qalisa masinyane ngempendulo uqobo. "
+            "Qedisa ngesexwayiso esifitshane esithi ulwazi lolu aluthathi indawo yokuhlolwa ngudokotela.\n\n"
+        ),
+        "chinyanja": (
+            lang_enforce + "\n"
+            "Ndinu mthandizi wa zaumoyo wa akatswiri pa zaumoyo wa amayi apakati komanso khansa ya chiberekero. "
+            "Yankhani funso la wogwiritsa ntchito pogwiritsa ntchito chidziwitso cholondola. "
+            "MUSAYAMBE ndi mawu ngati Chabwino, Inde, Nazi. "
+            "Yambani mwachindunji ndi yankho. "
+            "Malizitsani ndi chenjezo chachidule chonena kuti chidziwitsochi sichimalowa m'malo mwa kuyezetsa kwa dokotala.\n\n"
+        ),
+        "tonga": (
+            lang_enforce + "\n"
+            "Muli mweenzinyina wa buumi mu buumi bwa banakazi abali mu buumi bwa kubusya mwana alimwi ne ndenda ya mulomo wa cibeleko. "
+            "Tangi mpoonya mpoonyo ku mpendulo. "
+            "Malizya a kusinsimuna kufwaafwi kuti ulwazi ulu talusanduki ku lwandano lwa dokotela.\n\n"
+        ),
+        "bemba": (
+            lang_enforce + "\n"
+            "Uli kapyunga wa buumi uwashintilila pa buumi bwa banakashi abali ne fumo pamo ne kansa ya mulomo wa cibeleshi. "
+            "Tambilila ku lyasuko mwachindunji. "
+            "Pwishisheni ne cilembelo cipepa icilelanda ati ubu busuma tabusendapo icifulo ca kuyeshiwa kuli dokota.\n\n"
+        ),
+        "lozi": (
+            lang_enforce + "\n"
+            "Mu muthusi wa za mapilo wa bucwani ya iketile hahulu ku mapilo a basali baimana ni kankere ya mulomo wa sibeleko. "
+            "Qalisa hanghang ka karabo. "
+            "Felelisa ka temoso ye nyinyani ye e re ziboho ze ha zi nkeleli sibaka sa ku lekolwa ki dokota.\n\n"
+        ),
+    }
+
+    instruction = lang_instructions.get(lang, (
+        lang_enforce + "\n"
+        "You are a professional health assistant specializing in maternal health and cervical cancer for Dawa Health. "
+        "Answer the user question using correct and evidence-based health information. "
+        "DO NOT start with phrases like Okay, Sure, or Let me explain. "
+        "Start directly with the answer. "
+        "Include a brief disclaimer at the end stating that this information does not replace a doctor evaluation. "
+        "If asked about home visits, Dawa Health clinicians do home visits. "
+        f"Contact: email={company_email}, phone={company_phone}, address={company_address}, website={company_website}.\n\n"
+    ))
+
     try:
-        company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
-        company_email = "hello@dawa-health.com"
-        company_website = "https://dawa-health.com/"
-        company_phone = "+260 977 985 063"
+        gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+        response = gemini_model.generate_content(instruction + question)
 
-        if lang == "shona":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Uri mubatsiri wezvehutano ane hunyanzvi hwakakosha muhutano hwevakadzi vane pamuviri uye gomarara remuromo wechibereko. "
-                "Pindura mubvunzo wemushandisi uchishandisa ruzivo rwechokwadi uye rwakavakirwa pauchapupu rwezvehutano. "
-                "ZVINOKOSHA: Mhinduro inofanira kuva yakadzama, ine chokwadi, uye yehunyanzvi. "
-                "USATANGE nemitsara yakaita sekuti 'Zvakanaka', 'Hongu', 'Hezvino', kana kuti 'Rega nditsanangure'. "
-                "Tanga zvakananga nemhinduro. "
-                "Pedzisa nekuyambira kupfupi kunoti ruzivo urwu harutsivi kuongororwa nachiremba. "
-                "Pindura muShona yakajeka uye yakapfava:\n\n"
-            )
-        elif lang == "ndebele":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ungumsizi wezempilo ochwepheshile ogxile kwezempilo yabomama abakhulelweyo kanye lomdlavuza womlomo wesibeletho. "
-                "Phendula umbuzo womsebenzisi usebenzisa ulwazi lwezempilo oluqondileyo futhi olusekelwe ebufakazini. "
-                "OKUBALULEKILE: Impendulo kumele ibe eningiliziwe, ibe leqiniso, futhi ibe ngeyobungcweti. "
-                "UNGAKALI ngemisho efana lokuthi 'Kulungile', 'Yebo', 'Nakhu'. "
-                "Qalisa masinyane ngempendulo uqobo. "
-                "Qedisa ngesexwayiso esifitshane esithi ulwazi lolu aluthathi indawo yokuhlolwa ngudokotela. "
-                "Phendula ngesiNdebele esicacile:\n\n"
-            )
-        elif lang == "tonga":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Muli mweenzinyina wa buumi uuli mwiinda lyoonse mu buumi bwa banakazi abali mu buumi bwa kubusya mwana alimwi ne ndenda ya mulomo wa cibeleko. "
-                "Mupandule mwaambo wa musisi nikukonzya kwa buumi kululeme alimwi kwakavumbululwa kuli buci bwakazibidwe. "
-                "Tangi mpoonya mpoonyo ku mpendulo. "
-                "Malizya a kusinsimuna kufwaafwi kuti ulwazi ulu talusanduki ku lwandano lwa dokotela. "
-                "Mupandule mu Chitonga chakweelela alimwi chiswiipe:\n\n"
-            )
-        elif lang == "chinyanja":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Ndinu mthandizi wa zaumoyo wa akatswiri okhazikika pa zaumoyo wa amayi apakati komanso khansa ya khomo la chiberekero. "
-                "Yankhani funso la wogwiritsa ntchito pogwiritsa ntchito chidziwitso cholondola komanso chochokera ku umboni wa sayansi ya zaumoyo. "
-                "CHOFUNIKA: Yankho liyenera kukhala latsatanetsatane, lolondola, komanso laukatswiri. "
-                "MUSAYAMBE ndi mawu ngati 'Chabwino', 'Inde', 'Nazi'. "
-                "Yambani mwachindunji ndi yankho. "
-                "Malizitsani ndi chenjezo chachidule chonena kuti chidziwitsochi sichimalowa m'malo mwa kuyezetsa kwa dokotala. "
-                "Yankhani mu Chinyanja chomveka bwino:\n\n"
-            )
-        elif lang == "bemba":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Uli kapyunga wa buumi uwakwata ubuchindami uwashintilila pa buumi bwa banakashi abali ne fumo pamo ne kansa ya ku mulomo wa cibeleshi. "
-                "Yasuka ilipusho lya muntu uulefwaya amashiwi ukoresha ubusuma bwa buumi ubwalungama kabili ubwashintilila pa bucapo. "
-                "ICAKOSA: Ilyasuko lifwile ukuba ilyapwililika, ilyalungama, kabili ilya bucapo. "
-                "Tambilila ku lyasuko mwachindunji. "
-                "Pwishisheni ne cilembelo cipepa icilelanda ati ubu busuma tabusendapo icifulo ca kuyeshiwa kuli dokota. "
-                "Yasukeni mu Chibemba icamoneka bwino:\n\n"
-            )
-        elif lang == "lozi":
-            instruction = (
-                f"{lang_enforce}\n"
-                "Mu muthusi wa za mapilo wa bucwani ya iketile hahulu ku mapilo a basali baimana ni kankere ya mulomo wa sibeleko. "
-                "Alaba lipuzo la musebelisi mu kusebelisa ziboho za mapilo ze nepahezi ni ze zishimbilwe ku bupaki bwa sayansi. "
-                "SA BUTOKWA: Karabo i fanele kuba ya bunyinyani, ya niti, ni ya bucwani. "
-                "MU SA QALISE ka mafoko a swana ni 'Ho lukile', 'Eeni', 'Se'. "
-                "Qalisa hanghang ka karabo. "
-                "Felelisa ka temoso ye nyinyani ye e re ziboho ze ha zi nkeleli sibaka sa ku lekolwa ki dokota. "
-                "Arabela ka Silozi se si bonahala hande:\n\n"
-            )
-        else:
-            instruction = (
-                f"{lang_enforce}\n"
-                "You are a professional health assistant specializing in maternal health and cervical cancer for Dawa Health. "
-                "Answer the user's question using correct and evidence-based health information. "
-                "IMPORTANT: The response must be detailed, factual, and professional. "
-                "DO NOT start with phrases like 'Okay', 'Sure', 'Here's', or 'Let me explain'. "
-                "DO NOT include any conversational fillers. "
-                "Start directly with the answer. "
-                "Include a brief disclaimer at the end stating that this information does not replace a doctor's evaluation. "
-                "If a user asks questions like do you do home visits they are referring to Dawa Health and yes, Dawa Health clinicians do home visits. "
-                "If a user asks for a service or say that they want one you check for pricing in {products}. "
-                "Instructions in {instructions} are to be strictly followed. "
-                f"When a user asks about contact details, use company_email={company_email}, company_phone={company_phone}, company_address={company_address} and company_website={company_website}. "
-                "Respond in clear, simple English:\n\n"
-            )
+        # Safely extract text — response.text raises ValueError when content is blocked
+        try:
+            text = response.text
+            if text and text.strip():
+                return text.strip()
+        except (ValueError, AttributeError) as ve:
+            logging.warning(f"[Gemini] Blocked/empty response lang={lang}: {ve}")
+            try:
+                finish = response.candidates[0].finish_reason
+                logging.warning(f"[Gemini] Finish reason: {finish}")
+            except Exception:
+                pass
+            return fallback
 
-        model = genai.GenerativeModel("gemini-2.5-flash") 
-        response = model.generate_content(instruction + question)
-
-        if response and response.text:
-            return response.text.strip()
-        else:
-            return "Ndine urombo, handina kuwana mhinduro." if lang == "shona" else "Sorry, I couldn't find an answer."
+        return fallback
 
     except Exception as e:
-        print(f"[Gemini General Error] {e}")
         logging.error(f"[Gemini General Error] {type(e).__name__}: {e}")
-        return (
-            "Pane dambudziko pakupindura mubvunzo wako." if lang == "shona"
-            else "Sorry, there was an error answering your question."
-        )
+        return fallback
 
 
 def handle_ask_week(sender, prompt, phone_id):
