@@ -276,6 +276,11 @@ def detect_language(message, sender=None):
             "zviratidzo", "chiremba", "kusvotwa", "kurwadziwa",
             "handina", "ndinoda", "zvichava", "zvakadaro",
             "kwete", "hapana", "ndizvo", "zvakafanana",
+            # question words & common Shona words that get misdetected as English
+            "ndoziva", "nhumbu", "ndine", "ndiri", "ndinoziva",
+            "sei", "kuti", "zvii", "vanhu", "muviri", "mazuva",
+            "hesi", "ndatenda", "masvingo", "musha", "kuita",
+            "zvakanaka", "ndakadaro", "zviripo", "zvinobvira",
         ],
         "ndebele": [
             "sawubona", "salibonani", "unjani", "ngiyabonga", "ngicela",
@@ -357,8 +362,16 @@ def detect_language(message, sender=None):
 
         return detected_lang
 
+    # FIX: pure ASCII with no keyword match — do NOT default to English.
+    # If the user already has a detected language, keep it.
+    # Only return English if no prior language context exists.
     if all(ord(c) < 128 for c in message_lower):
-        logging.info("Pure ASCII with no local-language keyword match -> English")
+        if sender and sender in user_states:
+            current = user_states[sender].get("language", "english")
+            if current != "english":
+                logging.info(f"Pure ASCII, no keyword match — keeping existing language: {current}")
+                return current
+        logging.info("Pure ASCII with no local-language keyword match and no prior context -> English")
         return "english"
 
     logging.info("No language detected, defaulting to English")
@@ -547,7 +560,22 @@ def handle_follow_up(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
-    greeting_words = ["hi","hello","hey","hie","mhoro","mhoroi","sawubona","salibonani","moni","muli bwanji","mwabuka buti","mwaiseni","muli shani","mwa bona"]
+    greeting_words = [
+        # English
+        "hi", "hello", "hey", "hie",
+        # Shona
+        "mhoro", "mhoroi", "hesi", "makadini", "wadini",
+        # Ndebele
+        "sawubona", "salibonani",
+        # Chinyanja
+        "moni", "muli bwanji",
+        # Tonga
+        "mwabuka", "mwabuka buti", "mwalandwa", "mwalandwa buti",
+        # Bemba
+        "mwaiseni", "muli shani",
+        # Lozi
+        "mwa bona",
+    ]
     if any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words):
         reset_conversation(sender)
         # FIX: re-read state and lang after reset
@@ -669,10 +697,20 @@ def handle_general_followup(sender, prompt, phone_id):
     prompt_lower = prompt.lower().strip()
 
     greeting_words = [
+        # English
         "hi", "hello", "hey", "hie",
-        "mhoro", "mhoroi", "sawubona", "salibonani",
-        "moni", "muli bwanji", "mwabuka buti", "mwalandwa buti",
-        "mwaiseni", "muli shani", "mwa bona"
+        # Shona
+        "mhoro", "mhoroi", "hesi", "makadini", "wadini",
+        # Ndebele
+        "sawubona", "salibonani",
+        # Chinyanja
+        "moni", "muli bwanji",
+        # Tonga
+        "mwabuka", "mwabuka buti", "mwalandwa", "mwalandwa buti",
+        # Bemba
+        "mwaiseni", "muli shani",
+        # Lozi
+        "mwa bona",
     ]
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
 
@@ -834,7 +872,22 @@ def handle_main_menu(sender, prompt, phone_id):
     logging.info(f"Current state: step={state.get('step')}, topic={state.get('topic')}, language={lang}")
 
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
-    greeting_words = ["hi", "hello", "hey", "hie", "mhoro", "mhoroi", "sawubona", "salibonani", "hey", "hi there", "good morning", "good afternoon", "good evening", "moni", "muli bwanji"]
+    greeting_words = [
+        # English
+        "hi", "hello", "hey", "hie", "hi there", "good morning", "good afternoon", "good evening",
+        # Shona
+        "mhoro", "mhoroi", "hesi", "makadini", "wadini",
+        # Ndebele
+        "sawubona", "salibonani",
+        # Chinyanja
+        "moni", "muli bwanji",
+        # Tonga
+        "mwabuka", "mwabuka buti", "mwalandwa", "mwalandwa buti",
+        # Bemba
+        "mwaiseni", "muli shani",
+        # Lozi
+        "mwa bona",
+    ]
     
     is_reset = any(keyword in prompt_lower for keyword in reset_keywords)
     is_greeting = (
@@ -1399,23 +1452,51 @@ def format_products_for_display(products_list, lang):
 def handle_conversation_state(sender, prompt, phone_id):
     state = user_states[sender]
     prompt_lower = prompt.lower().strip()
-    
+
+    # ── UNIVERSAL greeting + reset intercept ──────────────────────────────────
+    # This fires BEFORE any step routing so a greeting at ANY step always resets
+    # cleanly — prevents stale topic/step from contaminating the new conversation.
+    ALL_GREETINGS = [
+        "hi", "hello", "hey", "hie", "hi there",
+        "good morning", "good afternoon", "good evening",
+        # Shona
+        "mhoro", "mhoroi", "hesi", "makadini", "wadini",
+        # Ndebele
+        "sawubona", "salibonani",
+        # Chinyanja
+        "moni", "muli bwanji",
+        # Tonga
+        "mwabuka", "mwabuka buti", "mwalandwa", "mwalandwa buti",
+        # Bemba
+        "mwaiseni", "muli shani",
+        # Lozi
+        "mwa bona",
+    ]
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset", "help"]
-    if any(keyword in prompt_lower for keyword in reset_keywords):
+
+    is_greeting = any(
+        prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower)
+        for w in ALL_GREETINGS
+    )
+    is_reset = any(kw in prompt_lower for kw in reset_keywords)
+
+    # Only skip during language_detection and registration
+    current_step_pre = state.get("step")
+    if (is_greeting or is_reset) and current_step_pre not in ["language_detection", "registration"]:
         reset_conversation(sender)
-        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
         greet_map = {
-            "shona": "Ndingakubatsirei nhasi?",
-            "ndebele": "Ngingakusiza ngani namuhla?",
-            "chinyanja": "Ndingakuthandizireni lero?",
-            "tonga": "Ndingamwafwa shani ilelo?",
-            "bemba": "Bushe kuti namwafwa shani lelo?",
-            "lozi": "Nka ku thusa ka mini sunu?",
+            "shona": "Mhoroi! Ndingakubatsirei nhasi?",
+            "ndebele": "Sawubona! Ngingakusiza ngani namuhla?",
+            "chinyanja": "Moni! Ndingakuthandizireni lero?",
+            "tonga": "Moni! Ndingamwafwa shani ilelo?",
+            "bemba": "Muli shani! Bushe kuti namwafwa shani lelo?",
+            "lozi": "Mwa bona! Nka ku thusa ka mini sunu?",
         }
-        send(greet_map.get(lang, "How can I help you today?"), sender, phone_id)
+        send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
         return
+    # ─────────────────────────────────────────────────────────────────────────
 
     current_step = state.get("step")
     
