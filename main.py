@@ -206,180 +206,166 @@ def save_user_conversation(sender, role, message):
 
 def detect_language(message, sender=None):
     message_lower = message.lower().strip()
-    
+
     if message_lower.isdigit():
         if sender and sender in user_states:
             return user_states[sender].get("language", "english")
         return "english"
-        
-    language_keywords = {
-        "shona": [
-            "mhoro", "mhoroi", "makadini", "hesi", "ndinonzi", "zvakanaka", "ndatenda",
-            "pamuviri", "zvigadzirwa", "chirwere", "gomarara", "chibereko",
-            "zviratidzo", "chiremba", "kubuda", "ropa", "kusvotwa", "kurwadziwa",
-            "ndapota", "handina", "ndinoda", "unei", "ndiri", "uri", "tiri", "vari",
-            "zviri", "zvichiri", "ndicha", "ucha", "ticha", "vacha", "zvaka", "zvanga",
-            "zvichava", "zvichange", "zvichada", "zvichaita", "mumwe", "vamwe", "zvimwe",
-            "zvakare", "zvakadaro", "saka", "asi", "nekuti", "kana", "kuti", "uye",
-            "kune", "kwete", "hapana", "ndizvo", "zvakadii", "zvakafanana", "zvakadaro"
-        ],
-        "ndebele": [
-            "sawubona", "salibonani", "unjani", "yebo", "ngiyabonga", "ngicela",
-            "isisu", "umntwana", "imikhiqizo", "isifo", "umhlaza", "isibeletho",
-            "izimpawu", "udokotela", "ukuphuma", "igazi", "ukuhlanza", "ubuhlungu",
-            "kuhle", "angikwazi", "ngifuna", "unani", "ngingani", "usuyini", "sisani",
-            "basani", "kukhona", "kuzoba", "kuzobe", "kuzokwazi", "kuzokwenza", "iviki",
-            "amaviki", "ukukhulelwa", "indlunkulu", "ubuchwepheshe", "umuntu", "abantu",
-            "izinto", "futhi", "kodwa", "ngoba", "uma", "ukuthi", "noma", "kepha", "cha",
-            "akukho", "impela", "kangaka", "kakhulu"
-        ],
-        "chinyanja": [
-            "moni", "muli bwanji", "bwanji", "zikomo", "ndapota", "pepani", "pakati",
-            "zogulitsa", "matenda", "kansa", "zizindikiro", "dokotala", "kutuluka",
-            "magazi", "kutentha", "kuopseza", "zabwino", "sindikudziwa", "ndikufuna",
-            "uli ndi chani", "ndili", "uli", "tili", "ali", "zili", "zichiri", "ndidza",
-            "udza", "tidza", "adza", "zaka", "zanga", "zichava", "zichabe", "zichada",
-            "zichita", "wina", "ena", "zina", "zabwino", "kotero", "koma", "chifukwa",
-            "ngati", "kuti", "ndipo", "kupita", "ayi", "palibe", "ndithu", "kodi",
-            "kusuta", "kumawononga", "amene", "ndikumuyembekezera", "sabata", "zambiri",
-            "funso", "masabata", "thanzo", "zinthu", "mavitamini", "zoyezera", "liti",
-            "lotani", "monga", "mwanj", "pamene", "panopa", "pang'ono", "pamwamba",
-            "nitandizeni", "nankani", "vumo", "mimba", "mwana", "thupi", "pathupi",
-            "tilandira", "thandizani", "muzindikire", "muzindikiri", "ndimva", "ndikumva",
-            "ndinafuna", "sindikumva", "ndiri ndi", "ine", "iwe", "ife", "inu", "iwo",
-            "ndimakhala", "ndimafuna", "zimenezi", "zimenezizi", "chonchi", "chomwe"
-        ],
-        "lozi": [
-            "mwa bona", "mwa amukelwa", "uli bwanji", "ee", "ndalumba", "ndapota",
-            "mbele", "ngwana", "zintu", "mulimo", "lwalelo", "mubili", "zibonelelo",
-            "ngaka", "kuhula", "mali", "kushisa", "kuzwisa buhlungu", "zande",
-            "ha ndi zibi", "ni na", "ndina", "sina", "bana", "bali", "zili",
-            "ku na", "ku ka ba", "ku ka konwa", "ku ka etwa", "viki", "maviki",
-            "ku imelela mwana", "mutango", "maano", "muntu", "bantu",
-            "zintu", "hape", "kamba", "ka mulandu wa", "haiba", "kuti",
-            "kapa", "fela", "haa", "hakuna", "handi", "ngana", "kakhulu",
-            "lini", "kai", "mutokolo", "mikopano", "lipuzo", "milimo",
-            "matanga", "zivita", "mavita", "ku leka", "ku nwa", "ku ja",
-            "mufuta", "mupilo", "mubonelelo", "mubulelo", "mufuta wa mubili",
-            "ka nako", "sika", "sina nako", "mwahala", "cwalo", "muzuhile cwani", "kimusihali", "kimanzibwana", "mucwani", "mulumele", "lumela", "cwalo cwalo"
-        ],
-        "bemba": [
-            "mwaiseni", "muli shani", "shani", "ulishani", "nalikutemwa", "natotela",
-            "twatotela", "ee", "awe", "limbi", "nshishibe", "napapata", "mukwai",
-            "icimbusu", "ngafweniko", "njafweniko", "bushe", "landa panono", "ifyo",
-            "cilikwisa", "umulungu", "mailo", "lelo", "pali cimo", "pali cibili",
-            "ulucelo", "icungulo", "ubushiku", "umuntu", "abantu", "umwana",
-            "abaice", "ifyakulya", "amanina", "inshita", "umwaice", "umukashana",
-            "umulumendo", "ukutemwa", "ukwenda", "ukwisa", "ukuya", "ukumona",
-            "ukulanda", "ukumfwa", "ukubomba", "ukuteya", "bwino", "fye", "sana",
-            "ukucilapo", "ukucepako", "icisungu", "icibemba", "shaleenipo",
-            "twalamonana", "mwashibukeni", "mwabombeni", "sendamenipo", "kabiyeni"
-        ],
-        "tonga": [
-            "mwalumela", "mwabuka buti", "mwalandwa buti", "ndatotela",
-            "twatotela", "yebo", "ehe", "iyayi", "kapati", "ndapota", "pepani",
-            "komboni", "muku", "mwana", "mwana musankwa", "mwana mwanakazi", "cisamu",
-            "kulya", "kumwa", "kucita", "kuya", "kwiza", "kumona", "kuzyiba", "kuvwwa",
-            "kubomba", "mbomba buti", "njise", "njaku", "njitu", "njibotu", "njibiyabi",
-            "lili", "lindi", "lino", "majana", "mazuba", "mabbali", "kuzwa", "mpi",
-            "kuti", "nchito", "ng'anda", "cisima", "bambo", "mama", "bamakwe", "mayo",
-            "sekulu", "nkuku", "kwendela", "ibvu", "musamu", "muti", "luwombo",
-            "ndisimutwe", "ndatola"
-        ],
-        "english": ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", 
-                   "how are you", "what's up", "hey there", "hi there", "help", "please",
-                   "thank you", "thanks", "yes", "no", "ok", "okay", "sorry"]
+
+    # ── English override ──────────────────────────────────────────────────────
+    # If ≥40 % of the unique words in the message are common English words,
+    # return "english" immediately – before any keyword scoring.
+    common_english_words = {
+        "the","a","an","is","are","was","were","be","been","being",
+        "have","has","had","do","does","did","will","would","could","should",
+        "may","might","shall","can","need","must","ought",
+        "i","you","he","she","it","we","they","me","him","her","us","them",
+        "my","your","his","its","our","their","this","that","these","those",
+        "what","which","who","whom","whose","where","when","why","how",
+        "and","or","but","if","then","so","because","although","while",
+        "not","no","yes","please","thank","thanks","sorry","okay","ok",
+        "to","of","in","on","at","for","from","with","about","during",
+        "signs","watch","out","risky","pregnancy","symptoms","tell","give",
+        "show","help","know","want","need","get","go","come","see","look",
+        "take","make","say","ask","work","feel","think","try","use","find",
+        "early","late","common","normal","severe","pain","blood","baby",
+        "mother","health","doctor","hospital","clinic","test","week","month",
+        "information","more","other","any","all","some","much","many","very",
+        "also","just","only","still","even","back","too","well","good","bad",
+        "new","old","long","little","right","big","high","low","next","last",
+        "between","after","before","during","since","until","without","within",
+        "up","down","over","under","again","further","once","same","own","both",
+        "each","few","most","such","than","as","by","into","through","against",
+        "along","following","across","behind","beyond","plus","except",
+        "including","throughout","towards","upon","concerning",
+        "cancer","cervical","maternal","infection","treatment","care",
+        "prevent","prevention","risk","sign","symptom","cause","effect","stage",
+        "screening","vaccine","hpv","period","bleeding","discharge","smell",
+        "trimester","birth","delivery","labor","feed","breastfeed","iron",
+        "vitamin","supplement","scan","ultrasound","check","visit","appointment",
     }
-    
+    words_in_msg = set(re.findall(r"[a-z]+", message_lower))
+    if words_in_msg:
+        en_count = sum(1 for w in words_in_msg if w in common_english_words)
+        ratio = en_count / len(words_in_msg)
+        if ratio >= 0.40:
+            logging.info(f"English override: {en_count}/{len(words_in_msg)} words matched ({ratio:.0%})")
+            return "english"
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Exact single-token matches (checked before scoring)
     exact_matches = {
-        "shona": ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo", "zvakanaka", "wadini", "taura", "ehe", "kwete"],
-        "ndebele": ["sawubona", "salibonani", "unjani", "yebo", "ngiyabonga", "ngicela", "cha", "impela", "kunjani", "hatshi", "kambe"],
-        "bemba": ["mwaiseni", "muli shani", "shani", "ulishani", "nalikutemwa", "natotela", "twatotela", "ee", "awe", "limbi", "bwino", "mukwai"],
-        "chinyanja": ["moni", "muli bwanji", "bwanji", "zikomo", "ndapota", "pepani", "ayi", "ndithu", "kodi", "inde", "chonde", "eyaa"],
-        "tonga": ["mwabuka buti", "mwalandwa buti", "mulibwanji", "ndatotela", "twatotela", "kapati", "ndapota", "ehe", "iyayi", "yebo", "mbwa"],
-        "lozi": ["mwa bona", "uli bwanji", "ee", "ndalumba", "ndapota", "pepani", "haa", "handi", "luna", "inde", "kuli", "kacenu"],
-        "english": ["hi", "hello", "hey", "hie", "yes", "no", "ok", "thanks", "thank you", "good", "great", "please"]
+        "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
+                      "zvakanaka", "wadini", "taura", "kwete"],
+        "ndebele":   ["sawubona", "salibonani", "unjani", "yebo", "ngiyabonga",
+                      "ngicela", "impela", "kunjani", "hatshi", "kambe"],
+        "bemba":     ["mwaiseni", "ulishani", "nalikutemwa", "natotela",
+                      "twatotela", "mukwai", "napapata"],
+        "chinyanja": ["moni", "zikomo", "pepani", "ndithu", "chonde", "eyaa",
+                      "nitandizeni", "nankani"],
+        "tonga":     ["mwabuka", "mwalandwa", "ndatotela", "kapati", "iyayi"],
+        "lozi":      ["ndalumba", "haa", "kacenu", "muzuhile"],
     }
-    
     for lang, words in exact_matches.items():
         if message_lower in words:
-            logging.info(f"Exact match detected: {message_lower} -> {lang}")
+            logging.info(f"Exact match: {message_lower} -> {lang}")
             return lang
-    
-    language_phrases = {
-        "chinyanja": [
-            "muli bwanji", "uli ndi chani", "kodi", "ndikufuna", "sindikudziwa",
-            "ndikumuyembekezera", "pakati panga", "sabata la", "zambiri za", 
-            "ndapota", "zikomo kwambiri", "muli bwino", "ndili bwino"
-        ],
+
+    # Keyword scoring — whole-word boundaries only to prevent false substring hits
+    # (e.g. "uri" must not match inside "during")
+    language_keywords = {
         "shona": [
-            "makadini", "unei", "ndinoda", "handina", "ndiri", "uri", "tiri",
-            "zviri", "zvichiri", "ndicha", "zvakanaka sei", "ndapota", "taura",
-            "ehe", "kwete", "ndatenda", "ndiriku", "variku"
+            "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
+            "pamuviri", "zvigadzirwa", "chirwere", "gomarara", "chibereko",
+            "zviratidzo", "chiremba", "kusvotwa", "kurwadziwa",
+            "handina", "ndinoda", "zvichava", "zvakadaro",
+            "kwete", "hapana", "ndizvo", "zvakafanana",
         ],
         "ndebele": [
-            "unjani", "ungalokhu", "ungathanda", "angikwazi", "ngifuna", "usuyini",
-            "ngiyabonga", "sicela", "kunjani", "hatshi", "kambe", "lapha", "khona"
+            "sawubona", "salibonani", "unjani", "ngiyabonga", "ngicela",
+            "isisu", "umntwana", "imikhiqizo", "umhlaza", "isibeletho",
+            "izimpawu", "udokotela", "igazi", "ubuhlungu",
+            "angikwazi", "ngifuna", "ukukhulelwa", "abantu",
+            "akukho", "impela", "kakhulu",
+        ],
+        "chinyanja": [
+            "moni", "zikomo", "pepani", "ndapota",
+            "matenda", "kansa", "zizindikiro", "dokotala",
+            "magazi", "zabwino", "sindikudziwa", "ndikufuna",
+            "sabata", "zambiri", "thanzo", "mavitamini",
+            "nitandizeni", "nankani", "vumo", "mimba",
+            "thandizani", "ndimva", "ndikumva", "ndinafuna",
         ],
         "lozi": [
-            "uli bwanji", "una ni", "kai", "ni bata", "ha ndi zibi", "ni mu embeleza",
-            "mukati ka mina", "viki ya", "zintu zeñi", "ndapota", "ndalumba",
-            "kuli", "kacenu", "handi zibi", "luna", "inde"
+            "ndalumba", "zibonelelo", "kuhula", "kushisa",
+            "maviki", "mutango", "mupilo", "mubonelelo",
+            "kacenu", "muzuhile", "kimanzibwana", "mulumele",
         ],
         "bemba": [
-            "muli shani", "ulishani", "nalikutemwa", "natotela", "twatotela", 
-            "napapita", "nshishibe", "ngafweniko", "bushe", "cilikwisa", 
-            "ukufuma", "ukufika", "pali cimo", "pali cibili", "mulungu",
-            "ifintu", "ifyakulya", "ukumona", "ukulanda", "bwino"
+            "mwaiseni", "nalikutemwa", "natotela", "twatotela", "mukwai",
+            "ngafweniko", "cilikwisa", "ubushiku", "ifyakulya",
+            "ukubomba", "icisungu", "icibemba", "shaleenipo",
         ],
         "tonga": [
-            "mulibwanji", "mwabuka buti", "mwalandwa buti", "ndatotela", 
-            "twatotela", "kapati", "ndapota", "ndazwa kwiinda", "ndisimutwe",
-            "mbomba buti", "njise", "njaku", "njitu", "lili", "lino", "kuti",
-            "ng'anda", "cisima", "bambo", "mama", "kuzwa", "kusika"
+            "mwalumela", "ndatotela", "twatotela", "kapati",
+            "mwana musankwa", "mwana mwanakazi",
+            "mbomba", "ndisimutwe", "ndatola", "mabbali",
         ],
         "english": [
-            "how are you", "what's up", "i want", "i don't know", "i'm waiting",
-            "between", "week of", "more about", "please", "thank you", "sorry",
-            "where is", "when", "today", "tomorrow", "yesterday", "good morning",
-            "good afternoon", "good evening", "help me", "i need"
-        ]
+            "what", "how", "when", "why", "where", "signs", "symptoms",
+            "pregnancy", "pregnant", "cervical", "cancer", "health",
+            "doctor", "hospital", "treatment", "information", "please",
+            "thank", "sorry", "help", "watch", "during", "risky",
+        ],
     }
-    
-    phrase_scores = {"shona": 0, "ndebele": 0, "chinyanja": 0, "lozi": 0, "english": 0, "bemba": 0, "tonga": 0}
+
+    # Phrase-level bonuses (+5 each)
+    language_phrases = {
+        "chinyanja": ["muli bwanji", "uli ndi chani", "zikomo kwambiri",
+                      "muli bwino", "ndili bwino", "nitandizeni nankani"],
+        "shona":     ["makadini", "zvakanaka sei", "ndatenda", "ndiriku"],
+        "ndebele":   ["unjani wena", "ngiyabonga kakhulu", "sicela ungichazele"],
+        "lozi":      ["uli bwanji", "ni bata", "ha ndi zibi", "ndalumba hahulu"],
+        "bemba":     ["muli shani", "napapita", "nshishibe", "bushe kuti"],
+        "tonga":     ["mwabuka buti", "mwalandwa buti", "ndazwa kwiinda"],
+        "english":   ["how are you", "what are", "what is", "can you",
+                      "tell me", "i need", "i want", "please tell",
+                      "watch out", "signs of", "signs to", "how do i",
+                      "how can i", "what should"],
+    }
+
+    scores = {lang: 0 for lang in language_keywords}
+
     for lang, phrases in language_phrases.items():
         for phrase in phrases:
             if phrase in message_lower:
-                phrase_scores[lang] += 5
-    
-    scores = {}
+                scores[lang] = scores.get(lang, 0) + 5
+
     for lang, keywords in language_keywords.items():
-        score = 0
-        for keyword in keywords:
-            if keyword in message_lower:
-                if f" {keyword} " in f" {message_lower} ":
-                    score += 3
-                else:
-                    score += 1
-        scores[lang] = score + phrase_scores.get(lang, 0)
-    
-    max_score = max(scores.values())
+        for kw in keywords:
+            if re.search(rf"\b{re.escape(kw)}\b", message_lower):
+                scores[lang] = scores.get(lang, 0) + 3
+
+    max_score = max(scores.values()) if scores else 0
     if max_score > 0:
         detected_lang = max(scores, key=scores.get)
-        logging.info(f"Language detected: {detected_lang} with score {max_score}")
-        
+        logging.info(f"Language scores: {scores} -> {detected_lang}")
+
         current_lang = user_states.get(sender, {}).get("language", "english")
-        # FIX: lowered threshold from 3 to 2 to allow easier language switching
-        if detected_lang != current_lang and max_score < 2:
-            logging.info(f"Low confidence switch ({max_score}), keeping current language: {current_lang}")
+        if detected_lang != current_lang and max_score < 3:
+            logging.info(f"Low confidence ({max_score}), keeping {current_lang}")
             return current_lang
-            
+
         return detected_lang
-    
-    logging.info("No specific language detected, defaulting to English")
+
+    # No keywords matched at all — pure ASCII/Latin text → English
+    if all(ord(c) < 128 for c in message_lower):
+        logging.info("Pure ASCII with no local-language keyword match -> English")
+        return "english"
+
+    logging.info("No language detected, defaulting to English")
     return "english"
-    
-    
+
 def is_question(prompt):
     prompt_lower = prompt.lower().strip()
     
