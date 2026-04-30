@@ -150,6 +150,8 @@ cervical_cancer_data_bemba = (
 '''Answer    
     - Nga ca kuti mufwile ukuyepimwa, ilingi line bakamupandako amano ya kuti mulelolela ukufika ilyo papita imilungu 12 ukutula apo mwafyele. Mufwile ukwebako dokota wenu. \n\n''',
 
+)
+
 cervical_cancer_data_bemba = (
 "**Category-Cervical Cancer FAQs**\n"
 "*Question 1:*\n"
