@@ -23,9 +23,15 @@ products_by_category = {
     "Cervical Cancer": [
         {
             "name": "HPV Test Kit",
-            "price": "K50",
+            "price": "K1000",
             "availability": "In Stock",
             "description": "HPV Test Kit for cervical cancer screening"
+        },
+        {
+            "name": "AI VIA Augmented",
+            "price": "K200",
+            "availability": "In Stock",
+            "description": "AI VIA for cervical cancer screening"
         }
     ],
     "General": [
@@ -63,3 +69,6 @@ products_by_category = {
         }
     ]
 }
+
+# Backward-compatible alias for modules that import `products`.
+products = products_by_category
