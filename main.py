@@ -1201,7 +1201,7 @@ def _ask_purchase_interest(sender, phone_id, lang):
         "bemba": "Ufuna ukugula imisansa yeesu? ",
         "lozi": "Kana u bata ku landa swakupila sa luna? ",
     }
-    send(ask_map.get(lang, "Would you like to purchase any of our products? We have ultrasound, Birth Kits, HPV Test etc"), sender, phone_id)
+    send(ask_map.get(lang, "Would you like to purchase any of our products?"), sender, phone_id)
     state["step"] = "shop_interest"
     save_single_user_state(sender)
 
@@ -1257,12 +1257,13 @@ def _interpret_shop_intent(prompt_lower):
         "yes", "yeah", "yep", "please", "sure", "ok", "okay", "alright",
         "ehe", "hongu", "ndizvo", "inde", "yebo",
         "product", "products", "what do you have", "what have you got",
-        "show me", "see", "available", "list", "categories", "what can i",
-        "buy", "order", "purchase", "get", "want", "need", "looking for",
+        "show me", "available", "categories", "add more", "something else",
+        "buy", "purchase", "looking for",
         "zvigadzirwa", "zvinhu", "imikhiqizo", "zinthu", "imisansa", "swakupila",
     ]
     decline_signals = [
-        "no", "nah", "nope", "not really", "not now", "later", "goodbye", "bye",
+        "no", "nah", "nope", "not really", "not now", "that's all", "that is all",
+        "done", "finish", "complete", "checkout", "later", "goodbye", "bye",
         "hapana", "kwete", "aiwa", "a'a", "ayi", "cha",
     ]
     if any(s in prompt_lower for s in browse_signals):
@@ -1617,15 +1618,18 @@ def handle_shop_add_more(sender, prompt, phone_id):
         state["step"] = "shop_address"
         save_single_user_state(sender)
     else:
-        clarify_map = {
-            "shona":     "Ungada here kuwedzera chimwe? Pindura 'hongu' kuona zvigadzirwa, kana 'kwete' kugadzirisa odha yako.",
-            "ndebele":   "Ungathanda ukwengeza okunye? Phendula 'yebo' ukuze ubone imikhiqizo, noma 'cha' ukuqeda i-odha.",
-            "chinyanja": "Kodi mukufuna kuwonjezera china? Yankha 'inde' kuona zinthu, kapena 'ayi' kumaliza dongosolo.",
-            "tonga":     "Ungafuna kuwonjezera china? Yankha 'inde' kuona zinthu, kapena 'ayi' kumaliza dongosolo.",
-            "bemba":     "Ufuna ukuwongesha fimo? Yasuka 'inde' ukubona imisansa, noma 'ayi' ukumalisha icigula.",
-            "lozi":      "Kana u bata ku yema se si liñwi? Arabela 'inde' ku bona swakupila, kamba 'ayi' ku feza landa.",
+        # Unknown input — safest assumption is they're done; ask for address
+        addr_map = {
+            "shona":     "Zvakanaka! Ndapota tipa kero yako yekuendesa (guta, nharaunda, uye mamwe mashoko akabatsira).",
+            "ndebele":   "Kulungile! Ngicela unike ikheli lakho lokuhambisa (idolobha, indawo, noma ulwazi olwengeziwe).",
+            "chinyanja": "Chabwino! Chonde tipatseni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china chopindulitsa).",
+            "tonga":     "Chabwino! Ndatola, tipeni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china).",
+            "bemba":     "Cino cino! Napapata, mpeele aderesi yenu ya kupeleka (tawuni, cifungo, kabili fimo ifyalumo).",
+            "lozi":      "Ho lokile! Ndapota, nipe aderesi ya hao ya ku alafa (tauni, sibaka, ni ze ñwi ze thusang).",
         }
-        send(clarify_map.get(lang, "Would you like to add anything else? Reply 'yes' to browse or 'no' to proceed to checkout."), sender, phone_id)
+        send(addr_map.get(lang, "Great! Please provide your delivery address (town, area, and any helpful details)."), sender, phone_id)
+        state["step"] = "shop_address"
+        save_single_user_state(sender)
 
 
 
