@@ -1191,7 +1191,7 @@ def handle_main_menu(sender, prompt, phone_id):
     
 
 def _ask_purchase_interest(sender, phone_id, lang):
-    """Ask the user if they'd like to purchase products, then show categories + samples."""
+    """Ask the user if they'd like to purchase , then show categories + samples."""
     state = user_states[sender]
     ask_map = {
         "shona": "Ungada here kutenga zvimwe zvezvigadzirwa zvedu? ",
@@ -1201,7 +1201,7 @@ def _ask_purchase_interest(sender, phone_id, lang):
         "bemba": "Ufuna ukugula imisansa yeesu? ",
         "lozi": "Kana u bata ku landa swakupila sa luna? ",
     }
-    send(ask_map.get(lang, "Would you like to purchase any of our products?"), sender, phone_id)
+    send(ask_map.get(lang, "Would you like to purchase any of our products? We have ultrasound, Birth Kits, HPV Test etc."), sender, phone_id)
     state["step"] = "shop_interest"
     save_single_user_state(sender)
 
