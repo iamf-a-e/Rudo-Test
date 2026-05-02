@@ -1201,7 +1201,7 @@ def _ask_purchase_interest(sender, phone_id, lang):
         "bemba": "Ufuna ukugula imisansa yeesu? ",
         "lozi": "Kana u bata ku landa swakupila sa luna? ",
     }
-    send(ask_map.get(lang, "Would you like to purchase any of our products?"), sender, phone_id)
+    send(ask_map.get(lang, "Would you like to purchase any of our products? We have ultrasound, Birth Kits, HPV Test etc"), sender, phone_id)
     state["step"] = "shop_interest"
     save_single_user_state(sender)
 
@@ -1480,26 +1480,33 @@ def _ask_quantity(sender, phone_id, lang, product_name):
 
 
 def handle_shop_quantity(sender, prompt, phone_id):
-    """Capture quantity and then ask for address."""
+    """Capture quantity, add item to cart, then ask if user wants anything else."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.strip()
 
-    # Try to extract a number
     qty_match = re.search(r"\d+", prompt_lower)
     if qty_match:
         qty = int(qty_match.group())
-        state["shop_quantity"] = qty
-        addr_map = {
-            "shona": "Ndatenda! Ndapota tipa kero yako yekuendesa (guta, nharaunda, uye chero mamwe mashoko akakurudzira kubatsira).",
-            "ndebele": "Ngiyabonga! Ngicela unike ikheli lakho lokuhambisa (idolobha, indawo, noma yiluphi ulwazi olwengeziwe olulusizo).",
-            "chinyanja": "Zikomo! Chonde tipatseni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china chopindulitsa).",
-            "tonga": "Twatotela! Ndatola, tipeni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china).",
-            "bemba": "Natotela! Napapata, mpeele aderesi yenu ya kupeleka (tawuni, cifungo, kabili fimo ifyalumo).",
-            "lozi": "Ndalumba! Ndapota, nipe aderesi ya hao ya ku alafa (tauni, sibaka, ni ze ñwi ze thusang).",
+
+        # Add item to cart
+        cart = state.setdefault("cart", [])
+        cart.append({
+            "product":  state.get("shop_selected_product", "Unknown"),
+            "price":    state.get("shop_selected_price", "N/A"),
+            "quantity": qty,
+        })
+
+        more_map = {
+            "shona":     f"✅ *{state.get('shop_selected_product')}* x{qty} yawedzerwa! Ungada here kuwedzera chimwe chigadzirwa?",
+            "ndebele":   f"✅ *{state.get('shop_selected_product')}* x{qty} yengezwe! Ungathanda ukwengeza umkhiqizo wolunye?",
+            "chinyanja": f"✅ *{state.get('shop_selected_product')}* x{qty} yaonjezedwa! Kodi mukufuna kuwonjezera chinthu china?",
+            "tonga":     f"✅ *{state.get('shop_selected_product')}* x{qty} yaonjezedwa! Ungafuna kuwonjezera chinthu china?",
+            "bemba":     f"✅ *{state.get('shop_selected_product')}* x{qty} yawongeshiwa! Ufuna ukuwongesha imisansa ina?",
+            "lozi":      f"✅ *{state.get('shop_selected_product')}* x{qty} i yemelizwe! Kana u bata ku yema swakupila si liñwi?",
         }
-        send(addr_map.get(lang, "Thank you! Please provide your delivery address (town, area, and any additional helpful details)."), sender, phone_id)
-        state["step"] = "shop_address"
+        send(more_map.get(lang, f"✅ *{state.get('shop_selected_product')}* x{qty} added! Would you like to add anything else?"), sender, phone_id)
+        state["step"] = "shop_add_more"
         save_single_user_state(sender)
     else:
         invalid_qty_map = {
@@ -1563,36 +1570,19 @@ def _send_order_confirmation(sender, phone_id, lang, cart, address):
 
 
 def handle_shop_address(sender, prompt, phone_id):
-    """Capture delivery address, add current item to cart, ask if user wants anything else."""
+    """Capture delivery address (asked only once), save all cart items and confirm."""
     state = user_states[sender]
     lang = state["language"]
     address = prompt.strip()
 
-    state["shop_address"] = address
-
-    # Append current item to cart
-    cart = state.setdefault("cart", [])
-    cart.append({
-        "product": state.get("shop_selected_product", "Unknown"),
-        "price":   state.get("shop_selected_price", "N/A"),
-        "quantity": state.get("shop_quantity", 1),
-    })
-
-    more_map = {
-        "shona":     "✅ Zvakanaka! Ndakuwanira. Ungada here kuwedzera chimwe chigadzirwa kuodha yako?",
-        "ndebele":   "✅ Kulungile! Ngikuqoqele. Ungathanda ukwengeza umkhiqizo ku-odha yakho?",
-        "chinyanja": "✅ Chabwino! Ndakujambulani. Kodi mukufuna kuwonjezera chinthu china ku dongosolo lanu?",
-        "tonga":     "✅ Chabwino! Ndakujambulani. Ungafuna kuwonjezera chinthu china ku dongosolo lako?",
-        "bemba":     "✅ Cino cino! Nalilembele. Ufuna ukuwongesha imisansa ina ku icigula cako?",
-        "lozi":      "✅ Ho lokile! Na ku ñolela. Kana u bata ku yema swakupila si liñwi ku landa la hao?",
-    }
-    send(more_map.get(lang, "✅ Got it! Would you like to add anything else to your order?"), sender, phone_id)
-    state["step"] = "shop_add_more"
-    save_single_user_state(sender)
+    cart = state.get("cart", [])
+    _save_orders_to_redis(sender, cart, address)
+    _send_order_confirmation(sender, phone_id, lang, cart, address)
+    reset_conversation(sender)
 
 
 def handle_shop_add_more(sender, prompt, phone_id):
-    """Handle 'anything else?' — either add more items or finalise the order."""
+    """Handle 'anything else?' — browse more or proceed to ask for delivery address."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
@@ -1614,11 +1604,18 @@ def handle_shop_add_more(sender, prompt, phone_id):
     if intent == "browse":
         _send_shop_categories(sender, phone_id, lang)
     elif intent == "decline":
-        cart    = state.get("cart", [])
-        address = state.get("shop_address", "")
-        _save_orders_to_redis(sender, cart, address)
-        _send_order_confirmation(sender, phone_id, lang, cart, address)
-        reset_conversation(sender)
+        # Now ask for address — only once, after all items selected
+        addr_map = {
+            "shona":     "Zvakanaka! Ndapota tipa kero yako yekuendesa (guta, nharaunda, uye mamwe mashoko akabatsira).",
+            "ndebele":   "Kulungile! Ngicela unike ikheli lakho lokuhambisa (idolobha, indawo, noma ulwazi olwengeziwe).",
+            "chinyanja": "Chabwino! Chonde tipatseni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china chopindulitsa).",
+            "tonga":     "Chabwino! Ndatola, tipeni adilesi yanu yokumanga (mzinda, dera, ndi chilichonse china).",
+            "bemba":     "Cino cino! Napapata, mpeele aderesi yenu ya kupeleka (tawuni, cifungo, kabili fimo ifyalumo).",
+            "lozi":      "Ho lokile! Ndapota, nipe aderesi ya hao ya ku alafa (tauni, sibaka, ni ze ñwi ze thusang).",
+        }
+        send(addr_map.get(lang, "Great! Please provide your delivery address (town, area, and any helpful details)."), sender, phone_id)
+        state["step"] = "shop_address"
+        save_single_user_state(sender)
     else:
         clarify_map = {
             "shona":     "Ungada here kuwedzera chimwe? Pindura 'hongu' kuona zvigadzirwa, kana 'kwete' kugadzirisa odha yako.",
@@ -1628,7 +1625,7 @@ def handle_shop_add_more(sender, prompt, phone_id):
             "bemba":     "Ufuna ukuwongesha fimo? Yasuka 'inde' ukubona imisansa, noma 'ayi' ukumalisha icigula.",
             "lozi":      "Kana u bata ku yema se si liñwi? Arabela 'inde' ku bona swakupila, kamba 'ayi' ku feza landa.",
         }
-        send(clarify_map.get(lang, "Would you like to add anything else? Reply 'yes' to browse or 'no' to finalise."), sender, phone_id)
+        send(clarify_map.get(lang, "Would you like to add anything else? Reply 'yes' to browse or 'no' to proceed to checkout."), sender, phone_id)
 
 
 
