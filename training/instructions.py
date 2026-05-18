@@ -151,7 +151,7 @@ User: 7840
 Bot: Mazvita! Nhamba yenyu yekuzivisa ichava DH-7840-HSTF. Chengetedza nhamba iyi sezvo ichazokumbirwa kumakiriniki edu. Ndingakubatsirei? (Provide Maternal Health/Cervical Cancer options)
 
 Greeting & Registration 2:
-User: Hey, I got connected from clinic B1.
+User: Hey DawaMom, I got connected from Mandebvu Clinic Poster 1.
 Bot: Hello! How can I help you today?
 
 
