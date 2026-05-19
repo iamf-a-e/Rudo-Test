@@ -442,10 +442,7 @@ def get_cervical_data(language):
         return cervical_cancer_data_chinyanja.cervical_cancer_data_chinyanja  
     elif language == "lozi":        
         return cervical_cancer_data_lozi.cervical_cancer_data_lozi 
-    elif language == "bemba":        
-        return cervical_cancer_data_bemba.cervical_cancer_data_bemba
-    elif language == "tonga":        
-        return cervical_cancer_data_tonga.cervical_cancer_data_tonga
+
     else:
         return cervical_cancer_data.cervical_cancer_data
         
