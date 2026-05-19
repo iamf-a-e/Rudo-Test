@@ -23,6 +23,9 @@ import re
 import random
 import string
 
+app = Flask(__name__)
+genai.configure(api_key=gen_api)
+
 logging.basicConfig(level=logging.INFO)
 
 # Initialize Upstash Redis connection
@@ -54,8 +57,6 @@ name = "Fae"
 bot_name = "Rudo"
 AGENT = "+263719835124"
 
-app = Flask(__name__)
-genai.configure(api_key=gen_api)
 
 class CustomURLExtract(URLExtract):
     def _get_cache_file_path(self):
