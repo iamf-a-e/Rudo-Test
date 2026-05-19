@@ -1138,7 +1138,7 @@ def handle_main_menu(sender, prompt, phone_id):
             }
             send(cc_what_map.get(lang, "Cervical cancer is a disease of the cervix, the lower part of the uterus that connects to the vagina. It is the second most common female malignancy worldwide and the most common in females in Zambia. It is a preventable and treatable disease, especially when detected early."), sender, phone_id)
 
-        elif prompt_lower in ["2", "symptoms", "early symptoms", "zviratidzo", "izimpawu", "zizindikiro", "Zitondezyo]:
+        elif prompt_lower in ["2", "symptoms", "early symptoms", "zviratidzo", "izimpawu", "zizindikiro", "Zitondezyo]":
             cc_sym_map = {
                 "shona": "Mumatanho ekutanga, cervical cancer kazhinji haina zviratidzo zvinooneka. Ndokusaka kuongororwa nguva nenguva kwakakosha. Sezvo cancer ichikura, zviratidzo zvinogona kusanganisira kubuda ropa kusingawanzo, kubuda kwezvipembenene zvinonhuwa, kana kurwadziwa panguva yekuita bonde.",
                 "ndebele": "Ezitebhisini zokuqala, i-cervical cancer ivamise ukungabi nezimpawu ezibonakalayo. Yingakho ukuhlolwa ngesikhathi esithile kubalulekile. Njengoba umhlaza ukhula, izimpawu zingahlanganisa ukuphuma kwegazi okungajwayelekile, ukuphuma kokomkhando olunephunga elibi, noma ubuhlungu ngesikhathi sokwenza ucansi.",
