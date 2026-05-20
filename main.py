@@ -52,7 +52,7 @@ model_name = "gemini-2.5-flash"
 genai.configure(api_key=gen_api)
 name = "Fae"
 bot_name = "Rudo"
-AGENT = "+260978760105"
+AGENT = ["+260978760105"]
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
