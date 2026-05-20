@@ -76,20 +76,12 @@ safety_settings = [
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},   
 ]
 
-# ─────────────────────────────────────────────
-#  REMOVED: global convo object
-#  All Gemini calls now use stateless per-call
-#  generation to prevent cross-user language
-#  contamination from shared chat history.
-# ─────────────────────────────────────────────
-
 
 # ─────────────────────────────────────────────
-#  PER-USER REDIS STATE  (fixes multi-user bug)
+#  PER-USER REDIS STATE
 # ─────────────────────────────────────────────
 
 def save_single_user_state(sender):
-    """Save only one user's state to Redis under their own key."""
     if redis_client and sender in user_states:
         try:
             redis_client.set(f"user_state:{sender}", json.dumps(user_states[sender]))
@@ -98,7 +90,6 @@ def save_single_user_state(sender):
             logging.error(f"Error saving state for {sender}: {e}")
 
 def load_user_state(sender):
-    """Load a single user's state from Redis. Returns dict or None."""
     if redis_client:
         try:
             state_data = redis_client.get(f"user_state:{sender}")
@@ -109,12 +100,10 @@ def load_user_state(sender):
     return None
 
 def save_user_states():
-    """Save all in-memory user states to Redis (one key per user)."""
     for sender in list(user_states.keys()):
         save_single_user_state(sender)
 
 def load_user_states():
-    """No-op at startup – states are loaded on demand per user."""
     global user_states
     user_states = {}
     logging.info("User states initialised (lazy per-user loading enabled)")
@@ -125,20 +114,14 @@ def load_user_states():
 # ─────────────────────────────────────────────
 
 def ensure_user_state(sender):
-    """
-    Make sure user_states[sender] exists.
-    Tries Redis first; if not found creates a fresh state.
-    Returns True if this is a brand-new user, False otherwise.
-    """
     if sender in user_states:
-        return False  # already in memory
+        return False
 
     saved = load_user_state(sender)
     if saved:
         user_states[sender] = saved
-        return False  # returning user
+        return False
 
-    # Brand-new user
     user_states[sender] = {
         "step": "language_detection",
         "language": "english",
@@ -167,7 +150,6 @@ def reset_conversation(sender):
 
 
 def get_user_conversation(sender):
-    """Get user conversation history from Upstash Redis"""
     if redis_client:
         try:
             history = redis_client.get(f"conversation:{sender}")
@@ -186,7 +168,6 @@ def get_user_conversation(sender):
     return []
 
 def save_user_conversation(sender, role, message):
-    """Save user conversation to Upstash Redis"""
     if redis_client:
         try:
             conversation = get_user_conversation(sender)
@@ -250,7 +231,6 @@ def detect_language(message, sender=None):
             logging.info(f"English override: {en_count}/{len(words_in_msg)} words matched ({ratio:.0%})")
             return "english"
 
-    # Exact single-token matches
     exact_matches = {
         "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
                       "zvakanaka", "wadini", "taura", "kwete"],
@@ -268,7 +248,6 @@ def detect_language(message, sender=None):
             logging.info(f"Exact match: {message_lower} -> {lang}")
             return lang
 
-    # Keyword scoring — whole-word boundaries only
     language_keywords = {
         "shona": [
             "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
@@ -276,7 +255,6 @@ def detect_language(message, sender=None):
             "zviratidzo", "chiremba", "kusvotwa", "kurwadziwa",
             "handina", "ndinoda", "zvichava", "zvakadaro",
             "kwete", "hapana", "ndizvo", "zvakafanana",
-            # question words & common Shona words that get misdetected as English
             "ndoziva", "nhumbu", "ndine", "ndiri", "ndinoziva",
             "sei", "kuti", "zvii", "vanhu", "muviri", "mazuva",
             "hesi", "ndatenda", "masvingo", "musha", "kuita",
@@ -351,7 +329,6 @@ def detect_language(message, sender=None):
         detected_lang = max(scores, key=scores.get)
         logging.info(f"Language scores: {scores} -> {detected_lang}")
 
-        # FIX: use user_states.get safely with fallback
         current_lang = "english"
         if sender and sender in user_states:
             current_lang = user_states[sender].get("language", "english")
@@ -362,9 +339,6 @@ def detect_language(message, sender=None):
 
         return detected_lang
 
-    # FIX: pure ASCII with no keyword match — do NOT default to English.
-    # If the user already has a detected language, keep it.
-    # Only return English if no prior language context exists.
     if all(ord(c) < 128 for c in message_lower):
         if sender and sender in user_states:
             current = user_states[sender].get("language", "english")
@@ -498,6 +472,40 @@ def remove(*file_paths):
             os.remove(file)
 
 
+# ─────────────────────────────────────────────
+#  CORE FIX: Continuous language detection
+#  Called at the TOP of handle_conversation_state
+#  before any routing happens.
+# ─────────────────────────────────────────────
+
+def maybe_update_language(sender, prompt):
+    """
+    Re-detect language on every incoming message (after registration).
+    Updates user state language if a different language is detected.
+    Returns the (possibly updated) language string.
+    """
+    state = user_states[sender]
+    current_step = state.get("step", "main_menu")
+
+    # Never re-detect during the registration flow
+    if current_step in ["language_detection", "registration"]:
+        return state.get("language", "english")
+
+    # Digit-only messages carry no language signal
+    if prompt.strip().isdigit():
+        return state.get("language", "english")
+
+    detected = detect_language(prompt, sender)
+    current_lang = state.get("language", "english")
+
+    if detected != current_lang:
+        logging.info(f"[maybe_update_language] Language switch for {sender}: {current_lang} -> {detected}")
+        state["language"] = detected
+        save_single_user_state(sender)
+
+    return state["language"]
+
+
 def handle_language_detection(sender, prompt, phone_id):
     detected_lang = detect_language(prompt, sender)
     user_states[sender]["language"] = detected_lang
@@ -556,29 +564,21 @@ def handle_registration(sender, prompt, phone_id):
 
 def handle_follow_up(sender, prompt, phone_id):
     state = user_states[sender]
-    # FIX: always read lang fresh from state after any potential reset
+    # Always read lang fresh — continuous detection may have updated it
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
     greeting_words = [
-        # English
         "hi", "hello", "hey", "hie",
-        # Shona
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
-        # Ndebele
         "sawubona", "salibonani",
-        # Chinyanja
         "moni", "muli bwanji",
-        # Tonga
         "Buti", "Muli Buti", "Mwatambulwa",
-        # Bemba
         "mwaiseni", "muli shani",
-        # Lozi
         "mwa bona",
     ]
     if any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words):
         reset_conversation(sender)
-        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
         greet_map = {"shona":"Mhoroi! Ndingakubatsirei nhasi?","ndebele":"Sawubona! Ngingakusiza ngani namuhla?","chinyanja":"Moni! Ndingakuthandizireni lero?","lozi":"Mwa bona! Nka ku thusa ka mini sunu?","tonga":"Muli buti! Nga ndamukwasya buti sunu?","bemba":"Muli shani! Bushe kuti namwafwa shani lelo?"}
@@ -609,9 +609,6 @@ def is_exact_match(text, responses):
     return any(word in responses for word in words)
 
 
-# ─────────────────────────────────────────────
-#  HELPER: send "thinking" indicator
-# ─────────────────────────────────────────────
 def _send_thinking(sender, phone_id, lang):
     thinking_map = {
         "shona": "Ndiri kufunga...",
@@ -624,9 +621,6 @@ def _send_thinking(sender, phone_id, lang):
     send(thinking_map.get(lang, "Let me think..."), sender, phone_id)
 
 
-# ─────────────────────────────────────────────
-#  HELPER: send "any more questions?" prompt
-# ─────────────────────────────────────────────
 def _send_more_questions(sender, phone_id, lang):
     more_map = {
         "shona": "Pane chimwe chamunoda kubvunza here?",
@@ -641,23 +635,17 @@ def _send_more_questions(sender, phone_id, lang):
 
 def handle_general_followup(sender, prompt, phone_id):
     state = user_states[sender]
+    # Always read lang fresh after continuous detection
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
     greeting_words = [
-        # English
         "hi", "hello", "hey", "hie",
-        # Shona
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
-        # Ndebele
         "sawubona", "salibonani",
-        # Chinyanja
         "moni", "muli bwanji",
-        # Tonga
         "mwabuka", "mwabuka buti", "mwalandwa", "mwalandwa buti",
-        # Bemba
         "mwaiseni", "muli shani",
-        # Lozi
         "mwa bona",
     ]
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
@@ -667,7 +655,6 @@ def handle_general_followup(sender, prompt, phone_id):
 
     if is_greeting or is_reset:
         reset_conversation(sender)
-        # FIX: re-read lang after reset
         state = user_states[sender]
         lang  = state["language"]
         greet_map = {
@@ -716,6 +703,7 @@ def handle_general_followup(sender, prompt, phone_id):
 
 def ask_follow_up_question(sender, phone_id):
     state = user_states[sender]
+    # Always read lang fresh
     lang = state["language"]
     
     followup_map = {
@@ -776,38 +764,9 @@ def switch_language_and_respond(sender, prompt, phone_id, current_lang, detected
     save_single_user_state(sender)
 
 
-# ─────────────────────────────────────────────
-#  FIX: Re-detect language on every message
-# ─────────────────────────────────────────────
-
-def maybe_update_language(sender, prompt):
-    """
-    Re-detect language on every incoming message (after registration).
-    Updates user state language if a different language is detected.
-    Returns the (possibly updated) language.
-    """
-    state = user_states[sender]
-    current_step = state.get("step", "main_menu")
-
-    if current_step in ["language_detection", "registration"]:
-        return state.get("language", "english")
-
-    if prompt.strip().isdigit():
-        return state.get("language", "english")
-
-    detected = detect_language(prompt, sender)
-    current_lang = state.get("language", "english")
-
-    if detected != current_lang:
-        logging.info(f"Language switch for {sender}: {current_lang} -> {detected}")
-        state["language"] = detected
-        save_single_user_state(sender)
-
-    return state["language"]
-
-
 def handle_main_menu(sender, prompt, phone_id):
     state = user_states[sender]
+    # Always read lang fresh — continuous detection already updated it
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
@@ -816,19 +775,12 @@ def handle_main_menu(sender, prompt, phone_id):
 
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
     greeting_words = [
-        # English
         "hi", "hello", "hey", "hie", "hi there", "good morning", "good afternoon", "good evening",
-        # Shona
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
-        # Ndebele
         "sawubona", "salibonani",
-        # Chinyanja
         "moni", "muli bwanji",
-        # Tonga
         "mwabuka", "mwabuka buti", "mwatambulwa", "Buti",
-        # Bemba
         "mwaiseni", "muli shani",
-        # Lozi
         "mwa bona",
     ]
     
@@ -840,7 +792,6 @@ def handle_main_menu(sender, prompt, phone_id):
     
     if is_greeting or is_reset:
         reset_conversation(sender)
-        # FIX: re-read state and lang after reset
         state = user_states[sender]
         lang = state["language"]
         greet_map = {
@@ -1013,7 +964,7 @@ def handle_main_menu(sender, prompt, phone_id):
                 )), sender, phone_id)
             save_single_user_state(sender)
             return
-#END of tonga refinement
+
         else:
             invalid_map = {
                 "shona": "Pindura ne '1' kuti uwane ruzivo kana '2' kuti ubvunze mibvunzo.",
@@ -1195,7 +1146,6 @@ def handle_main_menu(sender, prompt, phone_id):
    
 
 def _ask_purchase_interest(sender, phone_id, lang):
-    """Ask the user if they'd like to purchase , then show categories + samples."""
     state = user_states[sender]
     ask_map = {
         "shona": "Ungada here kutenga zvimwe zvezvigadzirwa zvedu? ",
@@ -1211,7 +1161,6 @@ def _ask_purchase_interest(sender, phone_id, lang):
 
 
 def _send_shop_categories(sender, phone_id, lang):
-    """Send category list with 1-2 sample products each."""
     lines = []
     header_map = {
         "shona": "🛒 Makategi eZvigadzirwa:\n",
@@ -1256,7 +1205,6 @@ def _send_shop_categories(sender, phone_id, lang):
 
 
 def _interpret_shop_intent(prompt_lower):
-    """Return 'browse', 'decline', or 'unknown' based on flexible intent matching."""
     browse_signals = [
         "yes", "yeah", "yep", "please", "sure", "ok", "okay", "alright",
         "ehe", "hongu", "ndizvo", "inde", "yebo",
@@ -1278,7 +1226,6 @@ def _interpret_shop_intent(prompt_lower):
 
 
 def handle_shop_interest(sender, prompt, phone_id):
-    """Handle flexible intent to browse/purchase products."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
@@ -1299,19 +1246,16 @@ def handle_shop_interest(sender, prompt, phone_id):
         send(bye_map.get(lang, "Alright! Have a nice day. Say 'hi' if you have more questions."), sender, phone_id)
         reset_conversation(sender)
     else:
-        # Unknown intent — show categories, most helpful default
         _send_shop_categories(sender, phone_id, lang)
 
 
 def handle_shop_browse(sender, prompt, phone_id):
-    """Handle category number or product name selection during browsing."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
     categories = list(products_by_category.keys())
 
-    # Check if user typed a category number
     if prompt_lower.isdigit():
         idx = int(prompt_lower) - 1
         if 0 <= idx < len(categories):
@@ -1331,7 +1275,7 @@ def handle_shop_browse(sender, prompt, phone_id):
                 "bemba": "\nBushe ulefwaya ukushita fima pali ifi? Yasuka 'ehe,' ulande neshina lyafyo ulefwaya ukushita nangu wasuke ukutila 'awe'.",
                 "lozi": "\nKana u bata ku landa se si liñwi sa swakupila se? Arabela 'inde' u bulele libizo, kamba 'ayi'.",
             }
-            lines.append(order_map.get(lang, "\Would you like to order any of these products? Reply 'yes' and tell us the product name, or 'no'."))
+            lines.append(order_map.get(lang, "\nWould you like to order any of these products? Reply 'yes' and tell us the product name, or 'no'."))
             send("\n".join(lines), sender, phone_id)
             state["step"] = "shop_order_decision"
             state["shop_category"] = cat_name
@@ -1349,7 +1293,6 @@ def handle_shop_browse(sender, prompt, phone_id):
             send(invalid_map.get(lang, f"Invalid number. Please choose between 1 and {len(categories)}."), sender, phone_id)
             return
 
-    # Check if user typed a product name — treat as direct order intent
     all_products_flat = [p for items in products_by_category.values() for p in items]
     matched = next((p for p in all_products_flat if p["name"].lower() in prompt_lower or prompt_lower in p["name"].lower()), None)
     if matched:
@@ -1358,12 +1301,10 @@ def handle_shop_browse(sender, prompt, phone_id):
         _ask_quantity(sender, phone_id, lang, matched["name"])
         return
 
-    # Otherwise re-prompt
     _send_shop_categories(sender, phone_id, lang)
 
 
 def handle_shop_order_decision(sender, prompt, phone_id):
-    """After browsing a category, did user want to order?"""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
@@ -1372,7 +1313,6 @@ def handle_shop_order_decision(sender, prompt, phone_id):
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "ayi", "not really", "cha"]
 
     if any(r in prompt_lower for r in yes_responses):
-        # Ask which product by name
         ask_which_map = {
             "shona": "Zvakanaka! Nyora zita rechigadzirwa chaunoda kuodha.",
             "ndebele": "Kulungile! Bhala igama lomkhiqizo ofuna ukuwodha.",
@@ -1386,7 +1326,6 @@ def handle_shop_order_decision(sender, prompt, phone_id):
         save_single_user_state(sender)
 
     elif any(r in prompt_lower for r in no_responses):
-        # Go back to categories
         see_more_map = {
             "shona": "Zvakanaka! Ungada here kuona mamwe makategi? ",
             "ndebele": "Kulungile! Ungathanda ukubona eminye imigqa? ",
@@ -1399,7 +1338,6 @@ def handle_shop_order_decision(sender, prompt, phone_id):
         state["step"] = "shop_more_categories"
         save_single_user_state(sender)
     else:
-        # Maybe they typed a product name directly
         all_products_flat = [p for items in products_by_category.values() for p in items]
         matched = next((p for p in all_products_flat if p["name"].lower() in prompt_lower or prompt_lower in p["name"].lower()), None)
         if matched:
@@ -1419,7 +1357,6 @@ def handle_shop_order_decision(sender, prompt, phone_id):
 
 
 def handle_shop_product_name(sender, prompt, phone_id):
-    """User typed a product name to order."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
@@ -1444,7 +1381,6 @@ def handle_shop_product_name(sender, prompt, phone_id):
 
 
 def handle_shop_more_categories(sender, prompt, phone_id):
-    """Handle flexible intent after asking if user wants to see more categories."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
@@ -1469,7 +1405,6 @@ def handle_shop_more_categories(sender, prompt, phone_id):
 
 
 def _ask_quantity(sender, phone_id, lang, product_name):
-    """Ask the user for quantity of the selected product."""
     state = user_states[sender]
     qty_map = {
         "shona": f"Zvakanaka! Mungada mangani e *{product_name}*?",
@@ -1485,7 +1420,6 @@ def _ask_quantity(sender, phone_id, lang, product_name):
 
 
 def handle_shop_quantity(sender, prompt, phone_id):
-    """Capture quantity, add item to cart, then ask if user wants anything else."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.strip()
@@ -1494,7 +1428,6 @@ def handle_shop_quantity(sender, prompt, phone_id):
     if qty_match:
         qty = int(qty_match.group())
 
-        # Add item to cart
         cart = state.setdefault("cart", [])
         cart.append({
             "product":  state.get("shop_selected_product", "Unknown"),
@@ -1526,7 +1459,6 @@ def handle_shop_quantity(sender, prompt, phone_id):
 
 
 def _save_orders_to_redis(sender, cart, address):
-    """Persist all cart items as individual order records in Redis."""
     if not redis_client:
         return
     user_id = user_states[sender].get("user_id", sender)
@@ -1550,7 +1482,6 @@ def _save_orders_to_redis(sender, cart, address):
 
 
 def _send_order_confirmation(sender, phone_id, lang, cart, address):
-    """Send a full order summary and farewell."""
     def build_lines(header, addr_label, closing):
         parts = [header, ""]
         for item in cart:
@@ -1572,10 +1503,7 @@ def _send_order_confirmation(sender, phone_id, lang, cart, address):
     send(msg_map.get(lang, default), sender, phone_id)
 
 
-
-
 def handle_shop_address(sender, prompt, phone_id):
-    """Capture delivery address (asked only once), save all cart items and confirm."""
     state = user_states[sender]
     lang = state["language"]
     address = prompt.strip()
@@ -1587,12 +1515,10 @@ def handle_shop_address(sender, prompt, phone_id):
 
 
 def handle_shop_add_more(sender, prompt, phone_id):
-    """Handle 'anything else?' — browse more or proceed to ask for delivery address."""
     state = user_states[sender]
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
-    # Check if they directly named a product
     all_products_flat = [p for items in products_by_category.values() for p in items]
     matched = next(
         (p for p in all_products_flat if p["name"].lower() in prompt_lower or prompt_lower in p["name"].lower()),
@@ -1609,7 +1535,6 @@ def handle_shop_add_more(sender, prompt, phone_id):
     if intent == "browse":
         _send_shop_categories(sender, phone_id, lang)
     elif intent == "decline":
-        # Now ask for address — only once, after all items selected
         addr_map = {
             "shona":     "Zvakanaka! Ndapota tipa kero yako yekuendesa (guta, nharaunda, uye mamwe mashoko akabatsira).",
             "ndebele":   "Kulungile! Ngicela unike ikheli lakho lokuhambisa (idolobha, indawo, noma ulwazi olwengeziwe).",
@@ -1622,7 +1547,6 @@ def handle_shop_add_more(sender, prompt, phone_id):
         state["step"] = "shop_address"
         save_single_user_state(sender)
     else:
-        # Unknown input — safest assumption is they're done; ask for address
         addr_map = {
             "shona":     "Zvakanaka! Ndapota tipa kero yako yekuendesa (guta, nharaunda, uye mamwe mashoko akabatsira).",
             "ndebele":   "Kulungile! Ngicela unike ikheli lakho lokuhambisa (idolobha, indawo, noma ulwazi olwengeziwe).",
@@ -1634,7 +1558,6 @@ def handle_shop_add_more(sender, prompt, phone_id):
         send(addr_map.get(lang, "Great! Please provide your delivery address (town, area, and any helpful details)."), sender, phone_id)
         state["step"] = "shop_address"
         save_single_user_state(sender)
-
 
 
 def handle_purchase_response(sender, prompt, phone_id):
@@ -1835,30 +1758,38 @@ def format_products_for_display(products_list, lang):
    
     return products_text
 
+
+# ─────────────────────────────────────────────
+#  CORE FIX: handle_conversation_state now
+#  runs maybe_update_language FIRST, before
+#  any routing. All handlers then read lang
+#  fresh from state["language"].
+# ─────────────────────────────────────────────
+
 def handle_conversation_state(sender, prompt, phone_id):
     state = user_states[sender]
-    prompt_lower = prompt.lower().strip()
+    current_step = state.get("step")
 
-    # ── UNIVERSAL greeting + reset intercept ──────────────────────────────────
-    # This fires BEFORE any step routing so a greeting at ANY step always resets
-    # cleanly — prevents stale topic/step from contaminating the new conversation.
+    # ── STEP 1: Update language on EVERY message (skip during registration) ──
+    if current_step not in ["language_detection", "registration"]:
+        maybe_update_language(sender, prompt)
+        # Re-read state after potential language update
+        state = user_states[sender]
+
+    # ── STEP 2: Universal greeting/reset intercept ───────────────────────────
+    # Fires AFTER language update so greeting response is in the new language
     ALL_GREETINGS = [
         "hi", "hello", "hey", "hie", "hi there",
         "good morning", "good afternoon", "good evening",
-        # Shona
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
-        # Ndebele
         "sawubona", "salibonani",
-        # Chinyanja
         "moni", "muli bwanji",
-        # Tonga
         "mwabuka", "mbuti", "mwalandwa", "mwalandwa buti",
-        # Bemba
         "mwaiseni", "muli shani", "shani",
-        # Lozi
         "mwa bona",
     ]
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset", "help"]
+    prompt_lower = prompt.lower().strip()
 
     is_greeting = any(
         prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower)
@@ -1866,12 +1797,11 @@ def handle_conversation_state(sender, prompt, phone_id):
     )
     is_reset = any(kw in prompt_lower for kw in reset_keywords)
 
-    # Only skip during language_detection and registration
-    current_step_pre = state.get("step")
-    if (is_greeting or is_reset) and current_step_pre not in ["language_detection", "registration"]:
+    # Only intercept when not in the initial registration steps
+    if (is_greeting or is_reset) and current_step not in ["language_detection", "registration"]:
         reset_conversation(sender)
-        state = user_states[sender]
-        lang = state["language"]
+        # Re-read lang AFTER reset (reset_conversation preserves language)
+        lang = user_states[sender]["language"]
         greet_map = {
             "shona": "Mhoroi! Ndingakubatsirei nhasi?",
             "ndebele": "Sawubona! Ngingakusiza ngani namuhla?",
@@ -1882,25 +1812,25 @@ def handle_conversation_state(sender, prompt, phone_id):
         }
         send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
         return
-    # ─────────────────────────────────────────────────────────────────────────
 
+    # ── STEP 3: Route to the correct handler ────────────────────────────────
+    # Every handler reads lang fresh from state["language"] at its own top
     current_step = state.get("step")
-   
+
     if current_step == "language_detection" and state.get("first_message", True):
         handle_language_detection(sender, prompt, phone_id)
     elif current_step == "registration":
         handle_registration(sender, prompt, phone_id)
-    elif current_step in ["ask_another_week", "cervical_more_info", "cervical_question_number", "keep_learning", "follow_up"]:
-        if current_step == "ask_another_week":
-            handle_another_week(sender, prompt, phone_id)
-        elif current_step == "cervical_more_info":
-            handle_cervical_more_info(sender, prompt, phone_id)
-        elif current_step == "cervical_question_number":
-            handle_cervical_question_number(sender, prompt, phone_id)
-        elif current_step == "keep_learning":
-            handle_keep_learning(sender, prompt, phone_id)
-        elif current_step == "follow_up":
-            handle_follow_up(sender, prompt, phone_id)
+    elif current_step == "ask_another_week":
+        handle_another_week(sender, prompt, phone_id)
+    elif current_step == "cervical_more_info":
+        handle_cervical_more_info(sender, prompt, phone_id)
+    elif current_step == "cervical_question_number":
+        handle_cervical_question_number(sender, prompt, phone_id)
+    elif current_step == "keep_learning":
+        handle_keep_learning(sender, prompt, phone_id)
+    elif current_step == "follow_up":
+        handle_follow_up(sender, prompt, phone_id)
     elif current_step == "product_inquiry":
         handle_purchase_response(sender, prompt, phone_id)
     elif current_step == "confirm_purchase":
@@ -1923,7 +1853,6 @@ def handle_conversation_state(sender, prompt, phone_id):
         handle_shop_address(sender, prompt, phone_id)
     elif current_step == "general_followup":
         handle_general_followup(sender, prompt, phone_id)
-        return
     elif current_step == "general_question":
         lang = state["language"]
         reply = ask_gemini_general(prompt, lang)
@@ -1931,10 +1860,9 @@ def handle_conversation_state(sender, prompt, phone_id):
         _send_more_questions(sender, phone_id, lang)
         state["step"] = "general_followup"
         save_single_user_state(sender)
-        return
     else:
         handle_main_menu(sender, prompt, phone_id)
-       
+
 
 def ask_cervical_more_info(sender, phone_id):
     state = user_states[sender]
@@ -2143,7 +2071,7 @@ def handle_another_week(sender, prompt, phone_id):
             "bemba": "Twatotela! Bushe kuti mwafwaya ukushita ifipe fyapabukulu? Natukwa na:\n- Ama-Prenatal Vitamins\n- Ifyakwishibilako nga muli pabukulu\n- Makiti ya Buumi bwa banamayo",
             "lozi": "Ndalumba! Kana u bata ku landa swakupila swa buimana? Lu na:\n- Mavitamini a Prenatal\n- Swakutatuba buimana\n- Makiti a Buimana",
         }
-        send(prod_offer_map.get(lang, "Thank you! Would you like to purchase maternal health products? We offer:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Ifipe fya kusakamana abafyashi"), sender, phone_id)
+        send(prod_offer_map.get(lang, "Thank you! Would you like to purchase maternal health products? We offer:\n- Prenatal Vitamins\n- Pregnancy Tests\n- Maternal Care Kits"), sender, phone_id)
         save_single_user_state(sender)
        
     else:
@@ -2159,8 +2087,7 @@ def handle_another_week(sender, prompt, phone_id):
 
 
 # ─────────────────────────────────────────────
-#  FIX: All Gemini functions now use stateless
-#  per-call generation — NO shared global convo
+#  Gemini helper functions (stateless)
 # ─────────────────────────────────────────────
 
 def _get_lang_enforce(lang: str) -> str:
@@ -2186,11 +2113,6 @@ def _get_fallback(lang: str) -> str:
 
 
 def ask_gemini(question: str, lang: str = "english") -> str:
-    """
-    Maternal health Gemini call.
-    FIX: uses stateless generate_content (no shared chat history).
-    FIX: language enforce instruction placed at END of prompt.
-    """
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
 
@@ -2224,7 +2146,6 @@ def ask_gemini(question: str, lang: str = "english") -> str:
         "Answer the following question clearly, simply, and with accurate health information:\n\n"
     ))
 
-    # FIX: language enforcement moved to END of prompt
     prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
     try:
@@ -2247,11 +2168,6 @@ def ask_gemini(question: str, lang: str = "english") -> str:
 
 
 def ask_gemini_cancer(question: str, lang: str = "english") -> str:
-    """
-    Cervical cancer Gemini call.
-    FIX: uses stateless generate_content (no shared chat history).
-    FIX: language enforce instruction placed at END of prompt.
-    """
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
 
@@ -2285,7 +2201,6 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
         "Answer the following question clearly and simply in English:\n\n"
     ))
 
-    # FIX: language enforcement moved to END of prompt
     prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
     try:
@@ -2308,11 +2223,6 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
 
 
 def ask_gemini_general(question: str, lang: str) -> str:
-    """
-    General Gemini call.
-    FIX: uses stateless generate_content (no shared chat history).
-    FIX: language enforce instruction placed at END of prompt.
-    """
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
 
@@ -2375,7 +2285,6 @@ def ask_gemini_general(question: str, lang: str) -> str:
         f"Contact: email={company_email}, phone={company_phone}, address={company_address}, website={company_website}.\n\n"
     ))
 
-    # FIX: language enforcement moved to END of prompt
     prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
 
     try:
@@ -2606,10 +2515,13 @@ def webhook():
                                             if not is_new:
                                                 user_states[sender]["first_message"] = False
 
-                                            # FIX: Re-detect language on every message
-                                            maybe_update_language(sender, prompt)
-                                           
+                                            # Save incoming message to conversation history
                                             save_user_conversation(sender, "user", prompt)
+
+                                            # ── SINGLE entry point ──
+                                            # handle_conversation_state now owns
+                                            # language detection internally.
+                                            # Do NOT call maybe_update_language here.
                                             handle_conversation_state(sender, prompt, phone_id)
                                            
                                         else:
