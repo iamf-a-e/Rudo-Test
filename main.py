@@ -175,6 +175,11 @@ def is_human_agent_request(prompt: str) -> bool:
     return any(trigger in p for trigger in HUMAN_AGENT_TRIGGERS)
 
 
+def normalize_phone(phone: str) -> str:
+    """Strip leading '+' so phone numbers are consistent regardless of source."""
+    return phone.lstrip("+")
+
+
 def send_interactive_buttons(phone_number: str, body_text: str, buttons: list, phone_id_val: str):
     """
     Send a WhatsApp interactive button message.
@@ -303,7 +308,7 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
             "started_at": datetime.now().isoformat(),
         }
         redis_client.set(_agent_session_key(user_number), json.dumps(session_data), ex=3600)
-        redis_client.set(f"agent_user_session:{agent_phone}", json.dumps(session_data), ex=3600)
+        redis_client.set(f"agent_user_session:{normalize_phone(agent_phone)}", json.dumps(session_data), ex=3600)
 
         # Find the accepting agent's name
         agent_name = next((n for n, p in AGENTS.items() if p == agent_phone), agent_phone)
@@ -465,7 +470,8 @@ def relay_agent_message_to_user(agent_phone: str, prompt: str, current_phone_id:
         return False
 
     try:
-        raw = redis_client.get(f"agent_user_session:{agent_phone}")
+        norm_agent = normalize_phone(agent_phone)
+        raw = redis_client.get(f"agent_user_session:{norm_agent}")
         if not raw:
             return False
         session = json.loads(raw)
@@ -478,7 +484,7 @@ def relay_agent_message_to_user(agent_phone: str, prompt: str, current_phone_id:
         # Agent ending the chat
         if prompt_stripped.upper() == "END CHAT":
             # Clean up sessions
-            redis_client.delete(f"agent_user_session:{agent_phone}")
+            redis_client.delete(f"agent_user_session:{norm_agent}")
             redis_client.delete(_agent_session_key(user_number))
             redis_client.delete(_agent_request_key(user_number))
 
@@ -3170,9 +3176,10 @@ def webhook():
                                             logging.info(f"Processing message from {sender}: {prompt}")
 
                                             # ── AGENT → USER relay ──────────────────────────
-                                            # If the sender is a known agent with an active session,
-                                            # relay their message to the user instead of bot-processing.
-                                            if sender in AGENTS.values():
+                                            # Normalise both sides: webhook sender has no '+',
+                                            # AGENTS dict values may have '+'.
+                                            _agent_phones_norm = {normalize_phone(p) for p in AGENTS.values()}
+                                            if normalize_phone(sender) in _agent_phones_norm:
                                                 relayed = relay_agent_message_to_user(sender, prompt, phone_id)
                                                 if relayed:
                                                     continue  # message was handled
