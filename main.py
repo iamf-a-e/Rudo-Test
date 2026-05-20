@@ -163,10 +163,10 @@ def reset_conversation(sender):
 # ─────────────────────────────────────────────
 
 HUMAN_AGENT_TRIGGERS = [
-    "human agent", "speak to agent", "talk to agent", "talk to a person",
-    "speak to a person", "real person", "human support", "live agent",
+    "human agent", "speak to agent", "talk to agent", "talk to a person", "human",
+    "speak to a person", "real person", "human support", "live agent", "support",
     "live support", "connect me to an agent", "i need help from a person",
-    "speak to someone", "talk to someone", "customer service",
+    "speak to someone", "talk to someone", "customer service", "agent",
 ]
 
 def is_human_agent_request(prompt: str) -> bool:
@@ -330,7 +330,7 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
         # Notify the user
         send(
             f"✅ Great news! {agent_name} has accepted your chat request.\n"
-            f"You are now connected. Type *END CHAT* to end the session.",
+            f"You are now connected!",
             user_number, current_phone_id
         )
 
@@ -2345,8 +2345,8 @@ def handle_conversation_state(sender, prompt, phone_id):
             send(
                 connecting_map.get(lang, (
                     "🔍 Looking for a human agent to assist you...\n"
-                    "Please wait. An agent will accept or decline within 60 seconds.\n"
-                    "Type *CANCEL* if you wish to return to Rudo."
+                    "Please wait.\n"
+                    
                 )),
                 sender, phone_id
             )
