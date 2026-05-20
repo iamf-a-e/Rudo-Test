@@ -52,7 +52,16 @@ model_name = "gemini-2.5-flash"
 genai.configure(api_key=gen_api)
 name = "Fae"
 bot_name = "Rudo"
-AGENT = ["+260978760105"]
+
+# ── AGENT DICTIONARY ─────────────────────────────────────────────────────────
+# Format: { "Agent Name": "+phone_number_with_country_code" }
+# Add or remove agents here. All agents will receive chat requests.
+AGENTS = {
+    "Agent 1": "+260978760105",
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
+AGENT_TIMEOUT_SECONDS = 60   # seconds before "no agents available" fires
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -148,6 +157,406 @@ def reset_conversation(sender):
     }
     save_single_user_state(sender)
 
+
+# ─────────────────────────────────────────────
+#  HUMAN AGENT SYSTEM
+# ─────────────────────────────────────────────
+
+HUMAN_AGENT_TRIGGERS = [
+    "human agent", "speak to agent", "talk to agent", "talk to a person",
+    "speak to a person", "real person", "human support", "live agent",
+    "live support", "connect me to an agent", "i need help from a person",
+    "speak to someone", "talk to someone", "customer service",
+]
+
+def is_human_agent_request(prompt: str) -> bool:
+    """Return True if the user is asking for a human agent."""
+    p = prompt.lower().strip()
+    return any(trigger in p for trigger in HUMAN_AGENT_TRIGGERS)
+
+
+def send_interactive_buttons(phone_number: str, body_text: str, buttons: list, phone_id_val: str):
+    """
+    Send a WhatsApp interactive button message.
+    buttons: list of dicts with keys 'id' and 'title' (max 3 buttons, title max 20 chars).
+    """
+    url = f"https://graph.facebook.com/v19.0/{phone_id_val}/messages"
+    headers = {
+        "Authorization": f"Bearer {wa_token}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body_text},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": btn["id"], "title": btn["title"]}}
+                    for btn in buttons
+                ]
+            },
+        },
+    }
+    resp = requests.post(url, headers=headers, json=data)
+    logging.info(f"Interactive button send to {phone_number}: {resp.status_code} {resp.text}")
+    return resp
+
+
+def _agent_request_key(user_number: str) -> str:
+    return f"agent_request:{user_number}"
+
+
+def _agent_session_key(user_number: str) -> str:
+    return f"agent_session:{user_number}"
+
+
+def _agent_rejections_key(user_number: str) -> str:
+    return f"agent_rejections:{user_number}"
+
+
+def notify_agents_of_request(sender: str, current_phone_id: str):
+    """
+    Broadcast a chat request to all agents with Accept / Reject buttons.
+    Stores request metadata in Redis with a TTL of AGENT_TIMEOUT_SECONDS.
+    """
+    state = user_states.get(sender, {})
+    user_id = state.get("user_id", sender)
+    lang = state.get("language", "english")
+
+    request_data = {
+        "user_number": sender,
+        "user_id": user_id,
+        "language": lang,
+        "phone_id": current_phone_id,
+        "timestamp": datetime.now().isoformat(),
+        "status": "pending",          # pending | accepted | expired
+        "accepted_by": None,
+        "rejections": [],
+    }
+
+    if redis_client:
+        try:
+            redis_client.set(
+                _agent_request_key(sender),
+                json.dumps(request_data),
+                ex=AGENT_TIMEOUT_SECONDS + 10,   # slight buffer
+            )
+            redis_client.set(_agent_rejections_key(sender), json.dumps([]), ex=AGENT_TIMEOUT_SECONDS + 10)
+        except Exception as e:
+            logging.error(f"Error saving agent request to Redis: {e}")
+
+    body = (
+        f"🔔 *New Chat Request*\n\n"
+        f"User ID : {user_id}\n"
+        f"Language: {lang}\n"
+        f"Phone   : {sender}\n\n"
+        f"Do you want to accept this chat?"
+    )
+    buttons = [
+        {"id": f"agent_accept:{sender}", "title": "✅ Accept"},
+        {"id": f"agent_reject:{sender}", "title": "❌ Reject"},
+    ]
+
+    for agent_name, agent_phone in AGENTS.items():
+        logging.info(f"Notifying agent {agent_name} ({agent_phone}) of request from {sender}")
+        send_interactive_buttons(agent_phone, body, buttons, current_phone_id)
+
+
+def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: str):
+    """Called when an agent taps Accept."""
+    if not redis_client:
+        send("Sorry, the agent system is unavailable right now.", user_number, current_phone_id)
+        return
+
+    try:
+        raw = redis_client.get(_agent_request_key(user_number))
+        if not raw:
+            # Request expired or already handled
+            send_interactive_buttons(
+                agent_phone,
+                "⚠️ This chat request has already expired or been accepted by another agent.",
+                [], current_phone_id
+            )
+            # Fall back: just send a plain message since no buttons needed
+            send("⚠️ This chat request has already expired or been accepted by another agent.", agent_phone, current_phone_id)
+            return
+
+        request_data = json.loads(raw)
+
+        if request_data.get("status") != "pending":
+            send("⚠️ This chat has already been accepted by another agent.", agent_phone, current_phone_id)
+            return
+
+        # Mark as accepted
+        request_data["status"] = "accepted"
+        request_data["accepted_by"] = agent_phone
+        redis_client.set(_agent_request_key(user_number), json.dumps(request_data), ex=3600)
+
+        # Store the live session
+        session_data = {
+            "user_number": user_number,
+            "agent_phone": agent_phone,
+            "phone_id": current_phone_id,
+            "started_at": datetime.now().isoformat(),
+        }
+        redis_client.set(_agent_session_key(user_number), json.dumps(session_data), ex=3600)
+        redis_client.set(f"agent_user_session:{agent_phone}", json.dumps(session_data), ex=3600)
+
+        # Find the accepting agent's name
+        agent_name = next((n for n, p in AGENTS.items() if p == agent_phone), agent_phone)
+
+        # ── Set user state to human_agent_chat ──────────────────────────────
+        ensure_user_state(user_number)
+        user_states[user_number]["step"] = "human_agent_chat"
+        user_states[user_number]["agent_phone"] = agent_phone
+        save_single_user_state(user_number)
+
+        # Notify the accepting agent
+        send(
+            f"✅ You are now connected to the user ({user_number}).\n"
+            f"Their messages will be forwarded to you. Reply here to send messages to them.\n"
+            f"Type *END CHAT* to end the session.",
+            agent_phone, current_phone_id
+        )
+
+        # Notify the user
+        send(
+            f"✅ Great news! {agent_name} has accepted your chat request.\n"
+            f"You are now connected. Type *END CHAT* to end the session.",
+            user_number, current_phone_id
+        )
+
+        # Notify all OTHER agents that this chat is taken
+        for other_name, other_phone in AGENTS.items():
+            if other_phone != agent_phone:
+                send(
+                    f"ℹ️ The chat request from user {user_number} has been accepted by {agent_name}.",
+                    other_phone, current_phone_id
+                )
+
+    except Exception as e:
+        logging.error(f"Error in handle_agent_accept: {e}", exc_info=True)
+
+
+def handle_agent_reject(agent_phone: str, user_number: str, current_phone_id: str):
+    """Called when an agent taps Reject."""
+    if not redis_client:
+        return
+
+    try:
+        raw = redis_client.get(_agent_request_key(user_number))
+        if not raw:
+            send("⚠️ This chat request has already expired.", agent_phone, current_phone_id)
+            return
+
+        request_data = json.loads(raw)
+        if request_data.get("status") != "pending":
+            send("ℹ️ This request was already handled.", agent_phone, current_phone_id)
+            return
+
+        # Record the rejection
+        rejections_raw = redis_client.get(_agent_rejections_key(user_number))
+        rejections = json.loads(rejections_raw) if rejections_raw else []
+        if agent_phone not in rejections:
+            rejections.append(agent_phone)
+        redis_client.set(_agent_rejections_key(user_number), json.dumps(rejections), ex=AGENT_TIMEOUT_SECONDS + 10)
+
+        send("👍 You have rejected this chat request.", agent_phone, current_phone_id)
+
+        # If ALL agents have rejected, notify the user immediately
+        if set(rejections) >= set(AGENTS.values()):
+            _handle_no_agents_available(user_number, current_phone_id)
+
+    except Exception as e:
+        logging.error(f"Error in handle_agent_reject: {e}", exc_info=True)
+
+
+def _handle_no_agents_available(user_number: str, current_phone_id: str):
+    """Notify the user that no agents are available and return to bot."""
+    ensure_user_state(user_number)
+    user_states[user_number]["step"] = "main_menu"
+    user_states[user_number].pop("agent_phone", None)
+    save_single_user_state(user_number)
+
+    if redis_client:
+        try:
+            redis_client.delete(_agent_request_key(user_number))
+            redis_client.delete(_agent_rejections_key(user_number))
+        except Exception:
+            pass
+
+    lang = user_states[user_number].get("language", "english")
+    no_agent_map = {
+        "shona": (
+            "😔 Ndine urombo, hapana mubatsiri anowanikwa parizvino.\n"
+            "Ndinokudzoseredzai kuna Rudo, mubatsiri wedu wepamhepo.\n"
+            "Pane chimwe chandingakubatsira nacho here?"
+        ),
+        "ndebele": (
+            "😔 Uxolo, awukho umuntu otholakalayo okwamanje.\n"
+            "Siyakubuyisela ku-Rudo, umsizi wethu we-inthanethi.\n"
+            "Ingabe kukhona okunye engingakusiza ngakho?"
+        ),
+        "chinyanja": (
+            "😔 Pepani, palibe wothandiza ali ndi ntchito pakali pano.\n"
+            "Tikubwereza kwa Rudo, wothandiza wathu wa intaneti.\n"
+            "Kodi pali zina zomwe ndingakuthandizireni?"
+        ),
+        "bemba": (
+            "😔 Njelelako, tapali mwafwilishi ulipo pali ino nshita.\n"
+            "Tulakulekela kuli Rudo, umwafwilishi wesu wa ku intaneti.\n"
+            "Kuli fintu fimbi ifyo ningamwafwilisha?"
+        ),
+        "lozi": (
+            "😔 Ni maswabi, ha ku na mubasi ya fumaneha cwale.\n"
+            "Lu ku kutiseza kwa Rudo, mubasi wa luna wa intaneti.\n"
+            "Ki sina sika ni ka thusa ka sona?"
+        ),
+        "tonga": (
+            "😔 Ndatola, kunyina wakugwasya ulikonzeka lino.\n"
+            "Tulamubweza kuli Rudo, wakugwasya wesu wa intaneti.\n"
+            "Hena muli amubuyo umbi?"
+        ),
+    }
+    send(
+        no_agent_map.get(lang, (
+            "😔 Sorry, no agents are available right now.\n"
+            "You have been handed back to Rudo, our virtual assistant.\n"
+            "Is there anything else I can help you with?"
+        )),
+        user_number, current_phone_id
+    )
+
+
+def relay_user_message_to_agent(sender: str, prompt: str, current_phone_id: str) -> bool:
+    """
+    If the user is in an active agent session, forward their message to the agent.
+    Returns True if message was relayed, False otherwise.
+    """
+    if not redis_client:
+        return False
+
+    try:
+        raw = redis_client.get(_agent_session_key(sender))
+        if not raw:
+            return False
+        session = json.loads(raw)
+        agent_phone = session.get("agent_phone")
+        if not agent_phone:
+            return False
+
+        # Forward user message to agent
+        send(f"💬 *User ({sender}):* {prompt}", agent_phone, current_phone_id)
+        return True
+    except Exception as e:
+        logging.error(f"Error relaying user message to agent: {e}")
+        return False
+
+
+def relay_agent_message_to_user(agent_phone: str, prompt: str, current_phone_id: str) -> bool:
+    """
+    If this sender is an agent with an active session, forward their message to the user.
+    Returns True if message was relayed (i.e., caller should NOT do normal bot processing).
+    """
+    if not redis_client:
+        return False
+
+    try:
+        raw = redis_client.get(f"agent_user_session:{agent_phone}")
+        if not raw:
+            return False
+        session = json.loads(raw)
+        user_number = session.get("user_number")
+        if not user_number:
+            return False
+
+        prompt_stripped = prompt.strip()
+
+        # Agent ending the chat
+        if prompt_stripped.upper() == "END CHAT":
+            # Clean up sessions
+            redis_client.delete(f"agent_user_session:{agent_phone}")
+            redis_client.delete(_agent_session_key(user_number))
+            redis_client.delete(_agent_request_key(user_number))
+
+            ensure_user_state(user_number)
+            user_states[user_number]["step"] = "main_menu"
+            user_states[user_number].pop("agent_phone", None)
+            save_single_user_state(user_number)
+
+            send("✅ You have ended the chat session.", agent_phone, current_phone_id)
+            lang = user_states[user_number].get("language", "english")
+            end_map = {
+                "shona": (
+                    "👋 Mubatsiri wangu akunge ngumi chisarai.\n"
+                    "Madzoka kumubatsiri wedu wepamhepo Rudo.\n"
+                    "Pane chimwe chandingakubatsira nacho?"
+                ),
+                "ndebele": (
+                    "👋 Umhloli wami uphethile inkulumo yakho.\n"
+                    "Ubuyela ku-Rudo, umsizi wethu we-inthanethi.\n"
+                    "Ingabe kukhona okunye engingakusiza ngakho?"
+                ),
+                "chinyanja": (
+                    "👋 Wothandiza wanu wamaliza kuchatitana nawo.\n"
+                    "Mumabwerera kwa Rudo, wothandiza wathu wa intaneti.\n"
+                    "Kodi pali zina zomwe ndingakuthandizireni?"
+                ),
+                "bemba": (
+                    "👋 Umwafwilishi wenu ashile ukumana nawe.\n"
+                    "Mwabwela kuli Rudo, umwafwilishi wesu wa ku intaneti.\n"
+                    "Kuli fintu fimbi ifyo ningamwafwilisha?"
+                ),
+                "lozi": (
+                    "👋 Mubasi wa hao u felelize puisano ya hao.\n"
+                    "U bwela kwa Rudo, mubasi wa luna wa intaneti.\n"
+                    "Ki sina sika ni ka thusa ka sona?"
+                ),
+                "tonga": (
+                    "👋 Wakugwasya wanu wamanizya kulumbaana anywi.\n"
+                    "Mubweza kuli Rudo, wakugwasya wesu wa intaneti.\n"
+                    "Hena muli amubuyo umbi?"
+                ),
+            }
+            send(
+                end_map.get(lang, (
+                    "👋 Your agent has ended the chat session.\n"
+                    "You have been returned to Rudo, our virtual assistant.\n"
+                    "Is there anything else I can help you with?"
+                )),
+                user_number, current_phone_id
+            )
+            return True
+
+        # Normal relay
+        send(f"💬 *Agent:* {prompt_stripped}", user_number, current_phone_id)
+        return True
+
+    except Exception as e:
+        logging.error(f"Error relaying agent message to user: {e}")
+        return False
+
+
+def check_agent_request_timeout(user_number: str, current_phone_id: str):
+    """
+    Check if the agent request has timed out (no Redis TTL means it expired).
+    Call this when the user sends a message while step == 'waiting_for_agent'.
+    """
+    if not redis_client:
+        _handle_no_agents_available(user_number, current_phone_id)
+        return
+
+    try:
+        raw = redis_client.get(_agent_request_key(user_number))
+        if not raw:
+            # Key expired → no agents responded in time
+            _handle_no_agents_available(user_number, current_phone_id)
+    except Exception as e:
+        logging.error(f"Error checking agent timeout: {e}")
+        _handle_no_agents_available(user_number, current_phone_id)
 
 # ─────────────────────────────────────────────
 #  REFERRAL SOURCE TRACKING
@@ -1842,6 +2251,104 @@ def handle_conversation_state(sender, prompt, phone_id):
         # Re-read state after potential language update
         state = user_states[sender]
 
+    # ── STEP 1b: Human-agent session relay ──────────────────────────────────
+    # If user is already in an active agent chat, forward their message and stop.
+    if current_step == "human_agent_chat":
+        relayed = relay_user_message_to_agent(sender, prompt, phone_id)
+        if not relayed:
+            # Session may have been cleaned up already; return user to bot
+            user_states[sender]["step"] = "main_menu"
+            user_states[sender].pop("agent_phone", None)
+            save_single_user_state(sender)
+            lang = user_states[sender].get("language", "english")
+            back_map = {
+                "shona": "Kubatanidza kwake kwakugumira. Ndinokudzoseredzai kuna Rudo. Ndingakubatsirei?",
+                "ndebele": "Uxhumano lwakho luphelile. Sibuyela ku-Rudo. Ngingakusiza?",
+                "chinyanja": "Maukumano anu amaliza. Tikubweza kwa Rudo. Ndingakuthandizireni?",
+                "bemba": "Ukumana kwenu kwashila. Mwabwela kuli Rudo. Kuti ningamwafwilisha?",
+                "lozi": "Puisano ya hao i fela. Ubwela kwa Rudo. Nka ku thusa?",
+                "tonga": "Kulumbaana kwanu kumanizya. Mubweza kuli Rudo. Nkugwasya buti?",
+            }
+            send(back_map.get(lang, "Your agent session has ended. Returning you to Rudo. How can I help?"), sender, phone_id)
+        return
+
+    # If user is waiting for an agent, check whether the request has timed out
+    if current_step == "waiting_for_agent":
+        if prompt.strip().upper() == "CANCEL":
+            # User cancels their own request
+            if redis_client:
+                try:
+                    redis_client.delete(_agent_request_key(sender))
+                    redis_client.delete(_agent_rejections_key(sender))
+                except Exception:
+                    pass
+            user_states[sender]["step"] = "main_menu"
+            save_single_user_state(sender)
+            lang = user_states[sender].get("language", "english")
+            cancel_map = {
+                "shona": "Tapota, chikumbiro chenyu chakanzurwa. Ndinokudzoseredzai kuna Rudo.",
+                "ndebele": "Kulungile, isicelo senu sikhansiliwe. Sibuyela ku-Rudo.",
+                "chinyanja": "Chabwino, pempho lanu lasanikizidwa. Tikubweza kwa Rudo.",
+                "bemba": "Chisuma, icipemba chenu chatanshibwa. Mwabwela kuli Rudo.",
+                "lozi": "Ho lokile, kopo ya hao i hamulelwa. Ubwela kwa Rudo.",
+                "tonga": "Kabotu, bulombwi bwanu bwasinkiwa. Mubweza kuli Rudo.",
+            }
+            send(cancel_map.get(lang, "Your request has been cancelled. Returning you to Rudo."), sender, phone_id)
+        else:
+            # Check if the Redis key has expired (timeout)
+            check_agent_request_timeout(sender, phone_id)
+        return
+
+    # ── STEP 1c: Human-agent request detection ───────────────────────────────
+    if current_step not in ["language_detection", "registration"]:
+        if is_human_agent_request(prompt):
+            lang = user_states[sender].get("language", "english")
+            # Tell user we're looking for an agent
+            connecting_map = {
+                "shona": (
+                    "🔍 Tiri kutsvaga mubatsiri wemunhu kuti akubatsirei...\n"
+                    "Ndapota mirira. Mubatsiri achabvumira kana aramba mukati memaminitsi rimwe.\n"
+                    "Nyora *CANCEL* kana uchida kudzosera kuna Rudo."
+                ),
+                "ndebele": (
+                    "🔍 Sifuna umuntu ozokusiza...\n"
+                    "Sicela ulinde. Umhloli uzowamukela noma ayenqabe ngemizuzwana engama-60.\n"
+                    "Bhala *CANCEL* uma ufuna ukubuyela ku-Rudo."
+                ),
+                "chinyanja": (
+                    "🔍 Tikufunafuna wothandiza wangwiro kwa inu...\n"
+                    "Chonde dikirini. Wothandiza adzayankha kapena akane mu mphindi imodzi.\n"
+                    "Lembani *CANCEL* mukafuna kubwera kwa Rudo."
+                ),
+                "bemba": (
+                    "🔍 Tukasanga umwafwilishi uwa bantu kwa imwe...\n"
+                    "Napapata dikileni. Umwafwilishi alayasuka naa ataike mu mamineti yimo.\n"
+                    "Lemba *CANCEL* nga mwafwaya ukubwela kuli Rudo."
+                ),
+                "lozi": (
+                    "🔍 Lu bata mubasi wa mutu ku thusa hao...\n"
+                    "Ndapota linda. Mubasi u ta amuhela kamba hana mwa miniti ye ñwi.\n"
+                    "Ñola *CANCEL* ha u bata ku bwela kwa Rudo."
+                ),
+                "tonga": (
+                    "🔍 Tulasanga wakugwasya wabantu kuti akugwasye...\n"
+                    "Ndapota linda. Wakugwasya ulamwaambila naa akane mukati aaminiti yomwe.\n"
+                    "Ñola *CANCEL* kuti mubweze kuli Rudo."
+                ),
+            }
+            send(
+                connecting_map.get(lang, (
+                    "🔍 Looking for a human agent to assist you...\n"
+                    "Please wait. An agent will accept or decline within 60 seconds.\n"
+                    "Type *CANCEL* if you wish to return to Rudo."
+                )),
+                sender, phone_id
+            )
+            user_states[sender]["step"] = "waiting_for_agent"
+            save_single_user_state(sender)
+            notify_agents_of_request(sender, phone_id)
+            return
+
     # ── STEP 2: Universal greeting/reset intercept ───────────────────────────
     # Fires AFTER language update so greeting response is in the new language
     ALL_GREETINGS = [
@@ -2584,6 +3091,34 @@ def handle_ask_week(sender, prompt, phone_id):
         send(range_map.get(lang, "Please enter a week between 1 and 40 only."), sender, phone_id)
            
 
+@app.route("/agent-timeout", methods=["POST"])
+def agent_timeout():
+    """
+    Called by a scheduled job (e.g. Upstash QStash) after AGENT_TIMEOUT_SECONDS.
+    Body JSON: { "user_number": "+260...", "phone_id": "..." }
+    If the request is still pending, it fires 'no agents available'.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        user_number = body.get("user_number")
+        current_phone_id = body.get("phone_id")
+
+        if not user_number or not current_phone_id:
+            return jsonify({"status": "error", "message": "Missing user_number or phone_id"}), 400
+
+        if redis_client:
+            raw = redis_client.get(_agent_request_key(user_number))
+            if raw:
+                request_data = json.loads(raw)
+                if request_data.get("status") == "pending":
+                    ensure_user_state(user_number)
+                    _handle_no_agents_available(user_number, current_phone_id)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logging.error(f"Error in agent_timeout endpoint: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/", methods=["GET"])
 def home():
     return render_template("connected.html")
@@ -2615,11 +3150,34 @@ def webhook():
                                     for message in value["messages"]:
                                         sender = message["from"]
                                         phone_id = value["metadata"]["phone_number_id"]
-                                       
+
+                                        # ── INTERACTIVE BUTTON REPLY (agent Accept/Reject) ──
+                                        if message.get("type") == "interactive":
+                                            interactive = message.get("interactive", {})
+                                            if interactive.get("type") == "button_reply":
+                                                btn_id = interactive["button_reply"]["id"]
+                                                logging.info(f"Button reply from {sender}: {btn_id}")
+                                                if btn_id.startswith("agent_accept:"):
+                                                    user_num = btn_id.split("agent_accept:", 1)[1]
+                                                    handle_agent_accept(sender, user_num, phone_id)
+                                                elif btn_id.startswith("agent_reject:"):
+                                                    user_num = btn_id.split("agent_reject:", 1)[1]
+                                                    handle_agent_reject(sender, user_num, phone_id)
+                                            continue  # skip normal processing for interactive msgs
+
                                         if "text" in message:
                                             prompt = message["text"]["body"]
                                             logging.info(f"Processing message from {sender}: {prompt}")
-                                           
+
+                                            # ── AGENT → USER relay ──────────────────────────
+                                            # If the sender is a known agent with an active session,
+                                            # relay their message to the user instead of bot-processing.
+                                            if sender in AGENTS.values():
+                                                relayed = relay_agent_message_to_user(sender, prompt, phone_id)
+                                                if relayed:
+                                                    continue  # message was handled
+
+                                            # ── Normal user message ──────────────────────────
                                             # Ensure state exists
                                             is_new = ensure_user_state(sender)
                                             if not is_new:
@@ -2628,14 +3186,13 @@ def webhook():
                                             # Save incoming message to conversation history
                                             save_user_conversation(sender, "user", prompt)
                                             
-                                            # ── Referral source detection (checked on every message
-                                            #    so late-arriving referral mentions are still captured) ──
+                                            # ── Referral source detection ────────────────────
                                             referral = extract_referral_source(prompt)
                                             if referral:
                                                 save_referral_source(sender, referral)
                                                 logging.info(f"Referral detected for {sender}: {referral}")
                                             
-                                            # ── SINGLE entry point ──
+                                            # ── SINGLE entry point ───────────────────────────
                                             handle_conversation_state(sender, prompt, phone_id)
 
                                         else:
