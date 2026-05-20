@@ -149,6 +149,72 @@ def reset_conversation(sender):
     save_single_user_state(sender)
 
 
+# ─────────────────────────────────────────────
+#  REFERRAL SOURCE TRACKING
+# ─────────────────────────────────────────────
+
+REFERRAL_TRIGGERS = [
+    "got connected from", "i got connected from", "i was connected from",
+    "connected from", "referred from", "coming from", "came from",
+    "i came from", "i'm from", "im from", "from the poster",
+    "from a poster", "from flyer", "from a flyer", "from the flyer",
+    "saw your poster", "saw a poster", "saw the poster",
+    "hey dawamom", "hi dawamom", "hello dawamom",
+]
+
+def extract_referral_source(prompt: str) -> str | None:
+    """
+    Returns the referral string (e.g. 'Mandebvu Pharmacy Poster 1')
+    if the message contains a referral signal, otherwise None.
+    """
+    prompt_lower = prompt.lower().strip()
+
+    # Must contain at least one trigger phrase
+    triggered = any(t in prompt_lower for t in REFERRAL_TRIGGERS)
+    if not triggered:
+        return None
+
+    # Try to isolate the source after known prepositions
+    for prep in ["from ", "from the ", "from a "]:
+        idx = prompt_lower.rfind(prep)        # take the LAST occurrence
+        if idx != -1:
+            source = prompt[idx + len(prep):].strip()
+            # Strip trailing punctuation
+            source = source.rstrip(".,!?;:")
+            if source:
+                return source
+
+    # Fallback: return everything after the trigger
+    for trigger in sorted(REFERRAL_TRIGGERS, key=len, reverse=True):
+        idx = prompt_lower.find(trigger)
+        if idx != -1:
+            source = prompt[idx + len(trigger):].strip().rstrip(".,!?;:")
+            if source:
+                return source
+
+    return None
+
+
+def save_referral_source(sender: str, source: str):
+    """Persist a referral entry to Redis under referrals:<sender>:<timestamp>."""
+    if not redis_client:
+        logging.warning("Redis not available — referral not saved.")
+        return
+    try:
+        entry = {
+            "sender": sender,
+            "source": source,
+            "user_id": user_states.get(sender, {}).get("user_id", "unregistered"),
+            "timestamp": datetime.now().isoformat(),
+        }
+        key = f"referrals:{sender}:{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        redis_client.set(key, json.dumps(entry))
+        logging.info(f"Referral saved → {key}: {entry}")
+    except Exception as e:
+        logging.error(f"Error saving referral: {e}")
+        
+
+
 def get_user_conversation(sender):
     if redis_client:
         try:
