@@ -662,7 +662,7 @@ def handle_follow_up(sender, prompt, phone_id):
         if len(prompt_lower.split()) > 2:
             _send_thinking(sender, phone_id, lang)
 
-        reply = ask_gemini_general(prompt, lang)
+        reply = ask_gemini_general(prompt, lang, sender=sender)
         send(reply, sender, phone_id)
         _send_more_questions(sender, phone_id, lang)
 
@@ -759,7 +759,7 @@ def handle_general_followup(sender, prompt, phone_id):
     if len(prompt_lower.split()) > 2:
         _send_thinking(sender, phone_id, lang)
 
-    reply = ask_gemini_general(prompt, lang)
+    reply = ask_gemini_general(prompt, lang, sender=sender)
     send(reply, sender, phone_id)
     _send_more_questions(sender, phone_id, lang)
 
@@ -1136,7 +1136,7 @@ def handle_main_menu(sender, prompt, phone_id):
     
         else:
             _send_thinking(sender, phone_id, lang)
-            gemini_response = ask_gemini(prompt, lang)  
+            gemini_response = ask_gemini(prompt, lang, sender=sender)  
             send(gemini_response, sender, phone_id)
         
         ask_follow_up_question(sender, phone_id)
@@ -1179,7 +1179,7 @@ def handle_main_menu(sender, prompt, phone_id):
 
         else:
             _send_thinking(sender, phone_id, lang)
-            gemini_response = ask_gemini_cancer(prompt, lang)  
+            gemini_response = ask_gemini_cancer(prompt, lang, sender=sender)  
             send(gemini_response, sender, phone_id)
            
         ask_follow_up_question(sender, phone_id)
@@ -1196,13 +1196,13 @@ def handle_main_menu(sender, prompt, phone_id):
    
     if is_direct_question:
         _send_thinking(sender, phone_id, lang)
-        gemini_response = ask_gemini(prompt, lang)
+        gemini_response = ask_gemini(prompt, lang, sender=sender)
         send(gemini_response, sender, phone_id)
         ask_follow_up_question(sender, phone_id)
         save_single_user_state(sender)
         return
 
-    gemini_reply = ask_gemini_general(prompt, lang)
+    gemini_reply = ask_gemini_general(prompt, lang, sender=sender)
     send(gemini_reply, sender, phone_id)
     _send_more_questions(sender, phone_id, lang)
    
@@ -1921,7 +1921,7 @@ def handle_conversation_state(sender, prompt, phone_id):
         handle_general_followup(sender, prompt, phone_id)
     elif current_step == "general_question":
         lang = state["language"]
-        reply = ask_gemini_general(prompt, lang)
+        reply = ask_gemini_general(prompt, lang, sender=sender)
         send(reply, sender, phone_id)
         _send_more_questions(sender, phone_id, lang)
         state["step"] = "general_followup"
@@ -2178,9 +2178,48 @@ def _get_fallback(lang: str) -> str:
     }.get(lang, "Sorry, there was a problem getting an answer.")
 
 
-def ask_gemini(question: str, lang: str = "english") -> str:
+# ─────────────────────────────────────────────
+#  CONVERSATION CONTEXT BUILDER
+# ─────────────────────────────────────────────
+
+def build_conversation_context(sender: str, max_turns: int = 6) -> str:
+    """
+    Returns the last `max_turns` exchanges (user + bot) as a formatted
+    string ready to be prepended to a Gemini prompt.
+    Skips system-noise messages (short ack-only bot replies).
+    """
+    history = get_user_conversation(sender)
+    if not history:
+        return ""
+
+    # Take the most recent entries, excluding the very last (current user msg
+    # already added before this call, so history[-1] IS the current message —
+    # we skip it to avoid duplication in the prompt)
+    recent = history[-( max_turns * 2 + 1):-1]   # up to 12 entries, skip last
+
+    lines = []
+    for entry in recent:
+        role    = entry.get("role", "")
+        message = entry.get("message", "").strip()
+        if not message:
+            continue
+        # Skip very short bot filler messages (thinking indicators, yes/no prompts)
+        if role == "bot" and len(message) < 20:
+            continue
+        tag = "User" if role == "user" else "Assistant"
+        lines.append(f"{tag}: {message}")
+
+    if not lines:
+        return ""
+
+    return "Previous conversation:\n" + "\n".join(lines) + "\n\n"
+
+
+def ask_gemini(question: str, lang: str = "english", sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
+
+    context = build_conversation_context(sender) if sender else ""
 
     instruction_body = {
         "shona": (
@@ -2212,7 +2251,7 @@ def ask_gemini(question: str, lang: str = "english") -> str:
         "Answer the following question clearly, simply, and with accurate health information:\n\n"
     ))
 
-    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
+    prompt = f"{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
 
     try:
         gemini_model = genai.GenerativeModel(
@@ -2233,9 +2272,11 @@ def ask_gemini(question: str, lang: str = "english") -> str:
         return fallback
 
 
-def ask_gemini_cancer(question: str, lang: str = "english") -> str:
+def ask_gemini_cancer(question: str, lang: str = "english", sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
+
+    context = build_conversation_context(sender) if sender else ""
 
     instruction_body = {
         "shona": (
@@ -2267,7 +2308,7 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
         "Answer the following question clearly and simply in English:\n\n"
     ))
 
-    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
+    prompt = f"{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
 
     try:
         gemini_model = genai.GenerativeModel(
@@ -2288,9 +2329,11 @@ def ask_gemini_cancer(question: str, lang: str = "english") -> str:
         return fallback
 
 
-def ask_gemini_general(question: str, lang: str) -> str:
+def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
+
+    context = build_conversation_context(sender) if sender else ""
 
     company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
     company_email   = "hello@dawa-health.com"
@@ -2332,7 +2375,7 @@ def ask_gemini_general(question: str, lang: str) -> str:
             "Uli kapyunga wa buumi uwashintilila pa buumi bwa banakashi abali ne fumo pamo ne kansa ya cervix mu kampani ka Dawa Health. "
             "Asuka amepusho ukubonfya amasuko ayalingile, ifishininkisho fyapafyabumi."
             "Witampa ukwasuka na emukwayi, ehe nangu leka nondolole."
-             "Asuka ukwabula ukupita mumbali nangula mukulungam."
+            "Asuka ukwabula ukupita mumbali nangula mukulungam."
             "Nga baipusha ukuti bushe ba dawa kuti baisa ku n'ganda?"
             "Pwisheni nokuti ifyebo namyeba tafilefuma kuli dokota nagula ukupyana dokota.\n\n"
         ),
@@ -2351,7 +2394,7 @@ def ask_gemini_general(question: str, lang: str) -> str:
         f"Contact: email={company_email}, phone={company_phone}, address={company_address}, website={company_website}.\n\n"
     ))
 
-    prompt = f"{instruction_body}{question}\n\n{lang_enforce}"
+    prompt = f"{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
 
     try:
         gemini_model = genai.GenerativeModel(
@@ -2375,6 +2418,7 @@ def ask_gemini_general(question: str, lang: str) -> str:
     except Exception as e:
         logging.error(f"[ask_gemini_general Error] {type(e).__name__}: {e}")
         return fallback
+
 
 
 def handle_ask_week(sender, prompt, phone_id):
@@ -2580,16 +2624,20 @@ def webhook():
                                             is_new = ensure_user_state(sender)
                                             if not is_new:
                                                 user_states[sender]["first_message"] = False
-
+                                            
                                             # Save incoming message to conversation history
                                             save_user_conversation(sender, "user", prompt)
-
+                                            
+                                            # ── Referral source detection (checked on every message
+                                            #    so late-arriving referral mentions are still captured) ──
+                                            referral = extract_referral_source(prompt)
+                                            if referral:
+                                                save_referral_source(sender, referral)
+                                                logging.info(f"Referral detected for {sender}: {referral}")
+                                            
                                             # ── SINGLE entry point ──
-                                            # handle_conversation_state now owns
-                                            # language detection internally.
-                                            # Do NOT call maybe_update_language here.
                                             handle_conversation_state(sender, prompt, phone_id)
-                                           
+
                                         else:
                                             logging.info(f"Non-text message received from {sender}")
                                             ensure_user_state(sender)
