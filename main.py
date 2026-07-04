@@ -674,44 +674,11 @@ def detect_language(message, sender=None):
             return user_states[sender].get("language", "english")
         return "english"
 
-    # ── English override ──────────────────────────────────────────────────────
-    common_english_words = {
-        "the","a","an","is","are","was","were","be","been","being",
-        "have","has","had","do","does","did","will","would","could","should",
-        "may","might","shall","can","need","must","ought",
-        "i","you","he","she","it","we","they","me","him","her","us","them",
-        "my","your","his","its","our","their","this","that","these","those",
-        "what","which","who","whom","whose","where","when","why","how",
-        "and","or","but","if","then","so","because","although","while",
-        "not","no","yes","please","thank","thanks","sorry","okay","ok",
-        "to","of","in","on","at","for","from","with","about","during",
-        "signs","watch","out","risky","pregnancy","symptoms","tell","give",
-        "show","help","know","want","need","get","go","come","see","look",
-        "take","make","say","ask","work","feel","think","try","use","find",
-        "early","late","common","normal","severe","pain","blood","baby",
-        "mother","health","doctor","hospital","clinic","test","week","month",
-        "information","more","other","any","all","some","much","many","very",
-        "also","just","only","still","even","back","too","well","good","bad",
-        "new","old","long","little","right","big","high","low","next","last",
-        "between","after","before","during","since","until","without","within",
-        "up","down","over","under","again","further","once","same","own","both",
-        "each","few","most","such","than","as","by","into","through","against",
-        "along","following","across","behind","beyond","plus","except",
-        "including","throughout","towards","upon","concerning",
-        "cancer","cervical","maternal","infection","treatment","care",
-        "prevent","prevention","risk","sign","symptom","cause","effect","stage",
-        "screening","vaccine","hpv","period","bleeding","discharge","smell",
-        "trimester","birth","delivery","labor","feed","breastfeed","iron",
-        "vitamin","supplement","scan","ultrasound","check","visit","appointment",
-    }
-    words_in_msg = set(re.findall(r"[a-z]+", message_lower))
-    if words_in_msg:
-        en_count = sum(1 for w in words_in_msg if w in common_english_words)
-        ratio = en_count / len(words_in_msg)
-        if ratio >= 0.40:
-            logging.info(f"English override: {en_count}/{len(words_in_msg)} words matched ({ratio:.0%})")
-            return "english"
+    current_lang = "english"
+    if sender and sender in user_states:
+        current_lang = user_states[sender].get("language", "english")
 
+    # ── Local-language keyword/phrase scoring runs FIRST ─────────────────────
     exact_matches = {
         "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
                       "zvakanaka", "wadini", "taura", "kwete"],
@@ -806,13 +773,10 @@ def detect_language(message, sender=None):
                 scores[lang] = scores.get(lang, 0) + 3
 
     max_score = max(scores.values()) if scores else 0
+
     if max_score > 0:
         detected_lang = max(scores, key=scores.get)
         logging.info(f"Language scores: {scores} -> {detected_lang}")
-
-        current_lang = "english"
-        if sender and sender in user_states:
-            current_lang = user_states[sender].get("language", "english")
 
         if detected_lang != current_lang and max_score < 3:
             logging.info(f"Low confidence ({max_score}), keeping {current_lang}")
@@ -820,17 +784,58 @@ def detect_language(message, sender=None):
 
         return detected_lang
 
+    # ── English-ratio override: ONLY used as a fallback when no local-  ──────
+    # ── language keyword/phrase matched anything at all.                ──────
+    common_english_words = {
+        "the","a","an","is","are","was","were","be","been","being",
+        "have","has","had","do","does","did","will","would","could","should",
+        "may","might","shall","can","need","must","ought",
+        "i","you","he","she","it","we","they","me","him","her","us","them",
+        "my","your","his","its","our","their","this","that","these","those",
+        "what","which","who","whom","whose","where","when","why","how",
+        "and","or","but","if","then","so","because","although","while",
+        "not","no","yes","please","thank","thanks","sorry","okay","ok",
+        "to","of","in","on","at","for","from","with","about","during",
+        "tell","give","show","help","know","want","need","get","go","come",
+        "see","look","take","make","say","ask","work","feel","think","try",
+        "use","find","early","late","common","normal","severe","pain","blood",
+        "baby","mother","health","information","more","other","any","all",
+        "some","much","many","very","also","just","only","still","even",
+        "back","too","well","good","bad","new","old","long","little","right",
+        "big","high","low","next","last","between","after","before","since",
+        "until","without","within","up","down","over","under","again",
+        "further","once","same","own","both","each","few","most","such",
+        "than","as","by","into","through","against","along","following",
+        "across","behind","beyond","plus","except","including","throughout",
+        "towards","upon","concerning",
+    }
+    words_in_msg = re.findall(r"[a-z]+", message_lower)
+    unique_words = set(words_in_msg)
+
+    # Require a real sentence, not a 2-3 word snippet, before trusting ratio
+    if len(words_in_msg) >= 5 and unique_words:
+        en_count = sum(1 for w in unique_words if w in common_english_words)
+        ratio = en_count / len(unique_words)
+
+        if ratio >= 0.40:
+            logging.info(f"English override: {en_count}/{len(unique_words)} words matched ({ratio:.0%})")
+            # Stay sticky to an already-established local language unless
+            # the English signal is overwhelming.
+            if current_lang != "english" and ratio < 0.7:
+                logging.info(f"Sticking with {current_lang} despite moderate English ratio ({ratio:.0%})")
+                return current_lang
+            return "english"
+
     if all(ord(c) < 128 for c in message_lower):
-        if sender and sender in user_states:
-            current = user_states[sender].get("language", "english")
-            if current != "english":
-                logging.info(f"Pure ASCII, no keyword match — keeping existing language: {current}")
-                return current
+        if current_lang != "english":
+            logging.info(f"Pure ASCII, no keyword match — keeping existing language: {current_lang}")
+            return current_lang
         logging.info("Pure ASCII with no local-language keyword match and no prior context -> English")
         return "english"
 
     logging.info("No language detected, defaulting to English")
     return "english"
+
 
 def is_question(prompt):
     prompt_lower = prompt.lower().strip()
