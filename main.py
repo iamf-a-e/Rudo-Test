@@ -740,9 +740,7 @@ def detect_language(message, sender=None):
         ],
         "english": [
             "what", "how", "when", "why", "where", "signs", "symptoms",
-            "pregnancy", "pregnant", "cervical", "cancer", "health",
-            "doctor", "hospital", "treatment", "information", "please",
-            "thank", "sorry", "help", "watch", "during", "risky",
+            "information", "please", "thank", "sorry", "help", "watch", "during", "risky",
         ],
     }
 
