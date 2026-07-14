@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify, render_template
 import requests    
 import os  
 import fitz 
-import sched    
+import sched   
 import time     
 import logging    
 from mimetypes import guess_type 
@@ -54,8 +54,6 @@ name = "Fae"
 bot_name = "Rudo"
 
 # ── AGENT DICTIONARY ─────────────────────────────────────────────────────────
-# Format: { "Agent Name": "+phone_number_with_country_code" }
-# Add or remove agents here. All agents will receive chat requests.
 AGENTS = {
     "Agent 1": "+260978760105",
 }
@@ -84,6 +82,30 @@ safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},   
 ]
+
+
+# ─────────────────────────────────────────────
+#  SHARED MATCHING HELPER
+# ─────────────────────────────────────────────
+
+def _contains_signal(prompt_lower: str, phrases: list) -> bool:
+    """
+    True if any phrase in `phrases` is present in prompt_lower.
+    - Single-word phrases are matched on WORD BOUNDARIES so they don't
+      false-positive inside unrelated longer words (e.g. 'no' inside
+      'know', 'cha' inside 'purchase', 'ok' inside 'broke').
+    - Multi-word phrases are matched as plain substrings, since a
+      multi-word phrase is specific enough not to appear by accident.
+    """
+    for phrase in phrases:
+        phrase_l = phrase.lower()
+        if " " in phrase_l:
+            if phrase_l in prompt_lower:
+                return True
+        else:
+            if re.search(rf"\b{re.escape(phrase_l)}\b", prompt_lower):
+                return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -172,7 +194,7 @@ HUMAN_AGENT_TRIGGERS = [
 def is_human_agent_request(prompt: str) -> bool:
     """Return True if the user is asking for a human agent."""
     p = prompt.lower().strip()
-    return any(trigger in p for trigger in HUMAN_AGENT_TRIGGERS)
+    return _contains_signal(p, HUMAN_AGENT_TRIGGERS)
 
 
 def normalize_phone(phone: str) -> str:
@@ -279,13 +301,11 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
     try:
         raw = redis_client.get(_agent_request_key(user_number))
         if not raw:
-            # Request expired or already handled
             send_interactive_buttons(
                 agent_phone,
                 "⚠️ This chat request has already expired or been accepted by another agent.",
                 [], current_phone_id
             )
-            # Fall back: just send a plain message since no buttons needed
             send("⚠️ This chat request has already expired or been accepted by another agent.", agent_phone, current_phone_id)
             return
 
@@ -295,12 +315,10 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
             send("⚠️ This chat has already been accepted by another agent.", agent_phone, current_phone_id)
             return
 
-        # Mark as accepted
         request_data["status"] = "accepted"
         request_data["accepted_by"] = agent_phone
         redis_client.set(_agent_request_key(user_number), json.dumps(request_data), ex=3600)
 
-        # Store the live session
         session_data = {
             "user_number": user_number,
             "agent_phone": agent_phone,
@@ -310,16 +328,13 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
         redis_client.set(_agent_session_key(user_number), json.dumps(session_data), ex=3600)
         redis_client.set(f"agent_user_session:{normalize_phone(agent_phone)}", json.dumps(session_data), ex=3600)
 
-        # Find the accepting agent's name
         agent_name = next((n for n, p in AGENTS.items() if p == agent_phone), agent_phone)
 
-        # ── Set user state to human_agent_chat ──────────────────────────────
         ensure_user_state(user_number)
         user_states[user_number]["step"] = "human_agent_chat"
         user_states[user_number]["agent_phone"] = agent_phone
         save_single_user_state(user_number)
 
-        # Notify the accepting agent
         send(
             f"✅ You are now connected to the user ({user_number}).\n"
             f"Their messages will be forwarded to you. Reply here to send messages to them.\n"
@@ -327,14 +342,12 @@ def handle_agent_accept(agent_phone: str, user_number: str, current_phone_id: st
             agent_phone, current_phone_id
         )
 
-        # Notify the user
         send(
             f"✅ Great news! {agent_name} has accepted your chat request.\n"
             f"You are now connected!",
             user_number, current_phone_id
         )
 
-        # Notify all OTHER agents that this chat is taken
         for other_name, other_phone in AGENTS.items():
             if other_phone != agent_phone:
                 send(
@@ -362,7 +375,6 @@ def handle_agent_reject(agent_phone: str, user_number: str, current_phone_id: st
             send("ℹ️ This request was already handled.", agent_phone, current_phone_id)
             return
 
-        # Record the rejection
         rejections_raw = redis_client.get(_agent_rejections_key(user_number))
         rejections = json.loads(rejections_raw) if rejections_raw else []
         if agent_phone not in rejections:
@@ -371,7 +383,6 @@ def handle_agent_reject(agent_phone: str, user_number: str, current_phone_id: st
 
         send("👍 You have rejected this chat request.", agent_phone, current_phone_id)
 
-        # If ALL agents have rejected, notify the user immediately
         if set(rejections) >= set(AGENTS.values()):
             _handle_no_agents_available(user_number, current_phone_id)
 
@@ -453,7 +464,6 @@ def relay_user_message_to_agent(sender: str, prompt: str, current_phone_id: str)
         if not agent_phone:
             return False
 
-        # Forward user message to agent
         send(f"💬 *User ({sender}):* {prompt}", agent_phone, current_phone_id)
         return True
     except Exception as e:
@@ -481,9 +491,7 @@ def relay_agent_message_to_user(agent_phone: str, prompt: str, current_phone_id:
 
         prompt_stripped = prompt.strip()
 
-        # Agent ending the chat
         if prompt_stripped.upper() == "END CHAT":
-            # Clean up sessions
             redis_client.delete(f"agent_user_session:{norm_agent}")
             redis_client.delete(_agent_session_key(user_number))
             redis_client.delete(_agent_request_key(user_number))
@@ -537,7 +545,6 @@ def relay_agent_message_to_user(agent_phone: str, prompt: str, current_phone_id:
             )
             return True
 
-        # Normal relay
         send(f"💬 *Agent:* {prompt_stripped}", user_number, current_phone_id)
         return True
 
@@ -558,7 +565,6 @@ def check_agent_request_timeout(user_number: str, current_phone_id: str):
     try:
         raw = redis_client.get(_agent_request_key(user_number))
         if not raw:
-            # Key expired → no agents responded in time
             _handle_no_agents_available(user_number, current_phone_id)
     except Exception as e:
         logging.error(f"Error checking agent timeout: {e}")
@@ -584,22 +590,18 @@ def extract_referral_source(prompt: str) -> str | None:
     """
     prompt_lower = prompt.lower().strip()
 
-    # Must contain at least one trigger phrase
     triggered = any(t in prompt_lower for t in REFERRAL_TRIGGERS)
     if not triggered:
         return None
 
-    # Try to isolate the source after known prepositions
     for prep in ["from ", "from the ", "from a "]:
-        idx = prompt_lower.rfind(prep)        # take the LAST occurrence
+        idx = prompt_lower.rfind(prep)
         if idx != -1:
             source = prompt[idx + len(prep):].strip()
-            # Strip trailing punctuation
             source = source.rstrip(".,!?;:")
             if source:
                 return source
 
-    # Fallback: return everything after the trigger
     for trigger in sorted(REFERRAL_TRIGGERS, key=len, reverse=True):
         idx = prompt_lower.find(trigger)
         if idx != -1:
@@ -666,6 +668,45 @@ def save_user_conversation(sender, role, message):
         except Exception as e:
             logging.error(f"Error saving conversation: {e}")
 
+
+# ─────────────────────────────────────────────
+#  LLM FALLBACK LANGUAGE CLASSIFIER
+#  Used only when local keyword/phrase scoring
+#  finds zero signal. Prevents permanent
+#  mis-defaulting to English for languages
+#  whose word lists have gaps.
+# ─────────────────────────────────────────────
+
+def _llm_detect_language(message: str):
+    supported = ["english", "shona", "ndebele", "chinyanja", "bemba", "tonga", "lozi"]
+    try:
+        classifier_prompt = (
+            "Identify which ONE of these languages the following WhatsApp message "
+            "is written in: english, shona, ndebele, chinyanja, bemba, tonga, lozi. "
+            "These are languages spoken in Zimbabwe and Zambia. The message may mix "
+            "in a few English loanwords (e.g. medical terms like 'cervical cancer' "
+            "or 'HPV') while still being primarily one of the other languages — in "
+            "that case, classify by the surrounding grammar/vocabulary, not the "
+            "loanwords. Reply with ONLY the single lowercase language name and "
+            "nothing else — no punctuation, no explanation.\n\n"
+            f"Message: \"{message}\""
+        )
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={"temperature": 0, "max_output_tokens": 10},
+            safety_settings=safety_settings,
+        )
+        response = gemini_model.generate_content(classifier_prompt)
+        guess = re.sub(r"[^a-z]", "", response.text.strip().lower())
+        if guess in supported:
+            logging.info(f"[_llm_detect_language] Classified as: {guess}")
+            return guess
+        logging.warning(f"[_llm_detect_language] Unrecognised output: {guess!r}")
+    except Exception as e:
+        logging.error(f"[_llm_detect_language Error] {type(e).__name__}: {e}")
+    return None
+
+
 def detect_language(message, sender=None):
     message_lower = message.lower().strip()
 
@@ -678,17 +719,17 @@ def detect_language(message, sender=None):
     if sender and sender in user_states:
         current_lang = user_states[sender].get("language", "english")
 
-    # ── Local-language keyword/phrase scoring runs FIRST ─────────────────────
+    # ── Exact single-word greeting matches ───────────────────────────────────
     exact_matches = {
         "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
                       "zvakanaka", "wadini", "taura", "kwete"],
         "ndebele":   ["sawubona", "salibonani", "unjani", "yebo", "ngiyabonga",
                       "ngicela", "impela", "kunjani", "hatshi", "kambe"],
-        "bemba":     ["mwaiseni", "ulishani", "nalikutemwa", "natotela", "shani", "Chisuma", "Sana", "Njelelako",
+        "bemba":     ["mwaiseni", "ulishani", "nalikutemwa", "natotela", "shani", "chisuma", "sana", "njelelako",
                       "twatotela", "mukwai", "napapata"],
         "chinyanja": ["moni", "zikomo", "pepani", "ndithu", "chonde", "eyaa",
                       "nitandizeni", "nankani"],
-        "tonga":     ["mwabuka", "mwalandwa", "ndatotela", "kapati", "Mbuti"],
+        "tonga":     ["mwabuka", "mwalandwa", "ndatotela", "kapati", "mbuti"],
         "lozi":      ["ndalumba", "haa", "kacenu", "muzuhile"],
     }
     for lang, words in exact_matches.items():
@@ -696,6 +737,9 @@ def detect_language(message, sender=None):
             logging.info(f"Exact match: {message_lower} -> {lang}")
             return lang
 
+    # NOTE: "kuti" removed from Shona — it's a shared Bantu conjunction used
+    # across Bemba/Nyanja/Tonga too, and treating it as Shona-exclusive was
+    # dragging unrelated-language messages toward Shona incorrectly.
     language_keywords = {
         "shona": [
             "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
@@ -704,9 +748,9 @@ def detect_language(message, sender=None):
             "handina", "ndinoda", "zvichava", "zvakadaro",
             "kwete", "hapana", "ndizvo", "zvakafanana",
             "ndoziva", "nhumbu", "ndine", "ndiri", "ndinoziva",
-            "sei", "kuti", "zvii", "vanhu", "muviri", "mazuva",
-            "hesi", "ndatenda", "masvingo", "musha", "kuita",
-            "zvakanaka", "ndakadaro", "zviripo", "zvinobvira",
+            "sei", "zvii", "vanhu", "muviri", "mazuva",
+            "hesi", "masvingo", "musha", "kuita",
+            "ndakadaro", "zviripo", "zvinobvira",
         ],
         "ndebele": [
             "sawubona", "salibonani", "unjani", "ngiyabonga", "ngicela",
@@ -720,13 +764,15 @@ def detect_language(message, sender=None):
             "matenda", "kansa", "zizindikiro", "dokotala",
             "magazi", "zabwino", "sindikudziwa", "ndikufuna",
             "sabata", "zambiri", "thanzo", "mavitamini",
-            "nitandizeni", "nankani", "vumo", "mimba",
+            "nitandizeni", "nankani", "vumo", "mimba", "bwanji",
             "thandizani", "ndimva", "ndikumva", "ndinafuna",
         ],
         "lozi": [
             "ndalumba", "zibonelelo", "kuhula", "kushisa",
             "maviki", "mutango", "mupilo", "mubonelelo",
             "kacenu", "muzuhile", "kimanzibwana", "mulumele",
+            "mutu", "lilimo", "silelezwa", "butuku", "musimbi",
+            "bulwazi", "cwale", "wakona", "wapimwa",
         ],
         "bemba": [
             "mwaiseni", "nalikutemwa", "natotela", "twatotela", "mukwai",
@@ -734,9 +780,9 @@ def detect_language(message, sender=None):
             "ukubomba", "icisungu", "icibemba", "shaleenipo",
         ],
         "tonga": [
-            "ndalumba", "lugwazyo", "mubuzyo", "kapati", "Zitondezyo",
-            "Mutumbu", "Dokota", "Cinzi", "Buti", "Makani", "Kusilikwa",
-            "mbubo", "buumi", "chibadela", "kaambo nzi", "Buumi", "Kuli", "Makani",
+            "ndalumba", "lugwazyo", "mubuzyo", "kapati", "zitondezyo",
+            "mutumbu", "dokota", "cinzi", "buti", "makani", "kusilikwa",
+            "mbubo", "buumi", "chibadela", "kaambo nzi",
         ],
         "english": [
             "what", "how", "when", "why", "where", "signs", "symptoms",
@@ -751,11 +797,10 @@ def detect_language(message, sender=None):
         "ndebele":   ["unjani wena", "ngiyabonga kakhulu", "sicela ungichazele"],
         "lozi":      ["uli bwanji", "ni bata", "ha ndi zibi", "ndalumba hahulu"],
         "bemba":     ["muli shani", "napapata", "nshishibe", "bushe kuti"],
-        "tonga":     ["mmuli buti", "ndakomba", "Tandizi" "Sena Kuti"],
+        "tonga":     ["mmuli buti", "ndakomba", "sena kuti"],
         "english":   ["how are you", "what are", "what is", "can you",
                       "tell me", "i need", "i want", "please tell",
-                      "watch out", "signs of", "signs to", "how do i",
-                      "how can i", "what should"],
+                      "watch out", "how do i", "how can i", "what should"],
     }
 
     scores = {lang: 0 for lang in language_keywords}
@@ -773,17 +818,38 @@ def detect_language(message, sender=None):
     max_score = max(scores.values()) if scores else 0
 
     if max_score > 0:
-        detected_lang = max(scores, key=scores.get)
-        logging.info(f"Language scores: {scores} -> {detected_lang}")
+        # Collect ALL languages tied at the top — don't just take whichever
+        # one Python's max() returns first by dict insertion order.
+        top_langs = [lang for lang, s in scores.items() if s == max_score]
+        logging.info(f"Language scores: {scores} -> candidates: {top_langs}")
 
-        if detected_lang != current_lang and max_score < 3:
-            logging.info(f"Low confidence ({max_score}), keeping {current_lang}")
+        # If the current language is among the top scorers, stay put —
+        # resolves ties without an arbitrary language-order bias.
+        if current_lang in top_langs:
             return current_lang
 
-        return detected_lang
+        # Only switch if exactly one language reached the max AND the
+        # signal is strong enough (a phrase match, or several keyword hits)
+        # — a single generic keyword (score of 3) alone is not enough.
+        if len(top_langs) == 1 and max_score >= 5:
+            return top_langs[0]
 
-    # ── English-ratio override: ONLY used as a fallback when no local-  ──────
-    # ── language keyword/phrase matched anything at all.                ──────
+        logging.info(f"Ambiguous/low-confidence detection ({max_score}, candidates={top_langs}); keeping {current_lang}")
+        return current_lang
+
+    # ── No local keyword/phrase signal at all. Try the LLM classifier   ──────
+    # ── before falling back to the English-ratio heuristic or English   ──────
+    # ── default — this covers vocabulary gaps in the keyword lists.     ──────
+    words_in_msg = re.findall(r"[a-z]+", message_lower)
+
+    if len(words_in_msg) >= 3:
+        llm_guess = _llm_detect_language(message)
+        if llm_guess:
+            if llm_guess != current_lang:
+                logging.info(f"[LLM fallback] Switching language: {current_lang} -> {llm_guess}")
+            return llm_guess
+
+    # ── English-ratio fallback: only reached if the LLM call failed/skipped ──
     common_english_words = {
         "the","a","an","is","are","was","were","be","been","being",
         "have","has","had","do","does","did","will","would","could","should",
@@ -807,18 +873,14 @@ def detect_language(message, sender=None):
         "across","behind","beyond","plus","except","including","throughout",
         "towards","upon","concerning",
     }
-    words_in_msg = re.findall(r"[a-z]+", message_lower)
     unique_words = set(words_in_msg)
 
-    # Require a real sentence, not a 2-3 word snippet, before trusting ratio
     if len(words_in_msg) >= 5 and unique_words:
         en_count = sum(1 for w in unique_words if w in common_english_words)
         ratio = en_count / len(unique_words)
 
         if ratio >= 0.40:
             logging.info(f"English override: {en_count}/{len(unique_words)} words matched ({ratio:.0%})")
-            # Stay sticky to an already-established local language unless
-            # the English signal is overwhelming.
             if current_lang != "english" and ratio < 0.7:
                 logging.info(f"Sticking with {current_lang} despite moderate English ratio ({ratio:.0%})")
                 return current_lang
@@ -957,9 +1019,7 @@ def remove(*file_paths):
 
 
 # ─────────────────────────────────────────────
-#  CORE FIX: Continuous language detection
-#  Called at the TOP of handle_conversation_state
-#  before any routing happens.
+#  Continuous language detection
 # ─────────────────────────────────────────────
 
 def maybe_update_language(sender, prompt):
@@ -971,11 +1031,9 @@ def maybe_update_language(sender, prompt):
     state = user_states[sender]
     current_step = state.get("step", "main_menu")
 
-    # Never re-detect during the registration flow
     if current_step in ["language_detection", "registration"]:
         return state.get("language", "english")
 
-    # Digit-only messages carry no language signal
     if prompt.strip().isdigit():
         return state.get("language", "english")
 
@@ -1015,14 +1073,34 @@ def handle_language_detection(sender, prompt, phone_id):
 
 
 def handle_registration(sender, prompt, phone_id):
+    """
+    Registration now STRICTLY requires exactly 4 digits and nothing else.
+    Any other input (a question, a word, digits mixed with text, more or
+    fewer than 4 digits) is rejected and the user is re-prompted — it will
+    never be silently accepted as the phone digits.
+    """
     state = user_states[sender]
     lang = state["language"]
-    
+    prompt_clean = prompt.strip()
+
     if state.get("phone_digits") is None:
-        state["phone_digits"] = prompt
+        if not re.fullmatch(r"\d{4}", prompt_clean):
+            invalid_map = {
+                "shona": "Ndapota nyorai manhamba mana chete ekupedzisira enhare yenyu (semuenzaniso: 1234).",
+                "ndebele": "Ngicela ubhale amadijithi amane kuphela okugcina enombolweni yakho yocingo (isibonelo: 1234).",
+                "chinyanja": "Chonde lembani manambala anayi okha omaliza a nambala yanu yafoni (mwachitsanzo: 1234).",
+                "tonga": "Ndakomba mulembe ma nambala aane luzutu aakumaninina anambala yenu ya foni (mucikozyanyo: 1234).",
+                "bemba": "Napapata lembeni fye amanambala 4 ayakulekelesha kuli nambala yenu ya foni (ichilangililo: 1234).",
+                "lozi": "Ndapota ñola dinomolo za mafelele a mane feela za foni ya hao (mutala: 1234).",
+            }
+            send(invalid_map.get(lang, "Please send only the last 4 digits of your phone number (e.g. 1234)."), sender, phone_id)
+            save_single_user_state(sender)
+            return  # stay on the registration step, do not advance
+
+        state["phone_digits"] = prompt_clean
         
         random_letters = ''.join(random.choices(string.ascii_uppercase, k=4))
-        user_id = f"DH-{prompt}-{random_letters}"
+        user_id = f"DH-{prompt_clean}-{random_letters}"
         state["user_id"] = user_id
         
         if lang == "shona":
@@ -1048,7 +1126,6 @@ def handle_registration(sender, prompt, phone_id):
 
 def handle_follow_up(sender, prompt, phone_id):
     state = user_states[sender]
-    # Always read lang fresh — continuous detection may have updated it
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
@@ -1057,11 +1134,11 @@ def handle_follow_up(sender, prompt, phone_id):
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
         "sawubona", "salibonani",
         "moni", "muli bwanji",
-        "Buti", "Muli Buti", "Mwatambulwa",
+        "buti", "muli buti", "mwatambulwa",
         "mwaiseni", "muli shani",
         "mwa bona",
     ]
-    if any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words):
+    if _contains_signal(prompt_lower, greeting_words):
         reset_conversation(sender)
         state = user_states[sender]
         lang = state["language"]
@@ -1070,22 +1147,21 @@ def handle_follow_up(sender, prompt, phone_id):
         save_single_user_state(sender)
         return
 
-    no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really",  "awe" "Pepe", "cha", "ayi"]
+    no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "awe", "pepe", "cha", "ayi"]
 
-    if any(response in prompt_lower for response in no_responses):
+    if _contains_signal(prompt_lower, no_responses):
         _ask_purchase_interest(sender, phone_id, lang)
         return
 
-    else:
-        if len(prompt_lower.split()) > 2:
-            _send_thinking(sender, phone_id, lang)
+    if len(prompt_lower.split()) > 2:
+        _send_thinking(sender, phone_id, lang)
 
-        reply = ask_gemini_general(prompt, lang, sender=sender)
-        send(reply, sender, phone_id)
-        _send_more_questions(sender, phone_id, lang)
+    reply = ask_gemini_general(prompt, lang, sender=sender)
+    send(reply, sender, phone_id)
+    _send_more_questions(sender, phone_id, lang)
 
-        state["step"] = "general_followup"
-        save_single_user_state(sender)
+    state["step"] = "general_followup"
+    save_single_user_state(sender)
 
 
 def is_exact_match(text, responses):
@@ -1119,7 +1195,6 @@ def _send_more_questions(sender, phone_id, lang):
 
 def handle_general_followup(sender, prompt, phone_id):
     state = user_states[sender]
-    # Always read lang fresh after continuous detection
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
@@ -1134,8 +1209,8 @@ def handle_general_followup(sender, prompt, phone_id):
     ]
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
 
-    is_greeting = any(prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower) for w in greeting_words)
-    is_reset    = any(kw in prompt_lower for kw in reset_keywords)
+    is_greeting = _contains_signal(prompt_lower, greeting_words)
+    is_reset    = _contains_signal(prompt_lower, reset_keywords)
 
     if is_greeting or is_reset:
         reset_conversation(sender)
@@ -1156,7 +1231,7 @@ def handle_general_followup(sender, prompt, phone_id):
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "inde"]
     no_responses  = ["no", "nah", "aiwa", "kwete", "hapana", "nope", "cha", "ayi"]
 
-    if any(r in prompt_lower for r in yes_responses):
+    if _contains_signal(prompt_lower, yes_responses):
         ask_map = {
             "shona": "Bvunzai mubvunzo wenyu.",
             "ndebele": "Ngiyacela ubuze umbuzo wakho.",
@@ -1170,7 +1245,7 @@ def handle_general_followup(sender, prompt, phone_id):
         save_single_user_state(sender)
         return
 
-    if any(r in prompt_lower for r in no_responses):
+    if _contains_signal(prompt_lower, no_responses):
         _ask_purchase_interest(sender, phone_id, lang)
         return
 
@@ -1187,7 +1262,6 @@ def handle_general_followup(sender, prompt, phone_id):
 
 def ask_follow_up_question(sender, phone_id):
     state = user_states[sender]
-    # Always read lang fresh
     lang = state["language"]
     
     followup_map = {
@@ -1250,7 +1324,6 @@ def switch_language_and_respond(sender, prompt, phone_id, current_lang, detected
 
 def handle_main_menu(sender, prompt, phone_id):
     state = user_states[sender]
-    # Always read lang fresh — continuous detection already updated it
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
 
@@ -1263,16 +1336,13 @@ def handle_main_menu(sender, prompt, phone_id):
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
         "sawubona", "salibonani",
         "moni", "muli bwanji",
-        "mwabuka", "mwabuka buti", "mwatambulwa", "Buti",
+        "mwabuka", "mwabuka buti", "mwatambulwa", "buti",
         "mwaiseni", "muli shani",
         "mwa bona",
     ]
     
-    is_reset = any(keyword in prompt_lower for keyword in reset_keywords)
-    is_greeting = (
-        any(prompt_lower.strip() == word for word in greeting_words) or
-        any(re.search(rf"\b{re.escape(word)}\b", prompt_lower) for word in greeting_words)
-    )
+    is_reset = _contains_signal(prompt_lower, reset_keywords)
+    is_greeting = _contains_signal(prompt_lower, greeting_words)
     
     if is_greeting or is_reset:
         reset_conversation(sender)
@@ -1702,9 +1772,9 @@ def _interpret_shop_intent(prompt_lower):
         "done", "finish", "complete", "checkout", "later", "goodbye", "bye",
         "hapana", "kwete", "aiwa", "a'a", "ayi", "cha",
     ]
-    if any(s in prompt_lower for s in browse_signals):
+    if _contains_signal(prompt_lower, browse_signals):
         return "browse"
-    if any(s in prompt_lower for s in decline_signals):
+    if _contains_signal(prompt_lower, decline_signals):
         return "decline"
     return "unknown"
 
@@ -1796,7 +1866,7 @@ def handle_shop_order_decision(sender, prompt, phone_id):
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "yebo"]
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "ayi", "not really", "cha"]
 
-    if any(r in prompt_lower for r in yes_responses):
+    if _contains_signal(prompt_lower, yes_responses):
         ask_which_map = {
             "shona": "Zvakanaka! Nyora zita rechigadzirwa chaunoda kuodha.",
             "ndebele": "Kulungile! Bhala igama lomkhiqizo ofuna ukuwodha.",
@@ -1809,7 +1879,7 @@ def handle_shop_order_decision(sender, prompt, phone_id):
         state["step"] = "shop_product_name"
         save_single_user_state(sender)
 
-    elif any(r in prompt_lower for r in no_responses):
+    elif _contains_signal(prompt_lower, no_responses):
         see_more_map = {
             "shona": "Zvakanaka! Ungada here kuona mamwe makategi? ",
             "ndebele": "Kulungile! Ungathanda ukubona eminye imigqa? ",
@@ -2052,7 +2122,7 @@ def handle_purchase_response(sender, prompt, phone_id):
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "ayi", "not really", "cha"]
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "yebo"]
    
-    if any(response in prompt_lower for response in no_responses):
+    if _contains_signal(prompt_lower, no_responses):
         bye_map = {
             "shona": "Ndatenda! Iva nezuva rakanaka. Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.",
             "ndebele": "Ngiyabonga! Ube nosuku oluhle. Uma uneminye imibuzo, qala ingxoxo entsha ngo-'unjani'.",
@@ -2065,7 +2135,7 @@ def handle_purchase_response(sender, prompt, phone_id):
         reset_conversation(sender)
         return
        
-    elif any(response in prompt_lower for response in yes_responses):
+    elif _contains_signal(prompt_lower, yes_responses):
         topic = state.get("topic")
        
         if topic == "maternal":
@@ -2145,7 +2215,7 @@ def handle_purchase_confirmation(sender, prompt, phone_id):
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "ayi", "not really", "cha"]
     yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "yebo"]
    
-    if any(response in prompt_lower for response in no_responses):
+    if _contains_signal(prompt_lower, no_responses):
         alright_map = {
             "shona": "Zvakanaka. Tinokutendai! Kana uine mimwe mibvunzo, tanga patsva nekuti 'hesi'.",
             "ndebele": "Kulungile. Ngiyabonga! Uma uneminye imibuzo, qala kabusha ngokuthi 'unjani'.",
@@ -2157,7 +2227,7 @@ def handle_purchase_confirmation(sender, prompt, phone_id):
         send(alright_map.get(lang, "Alright. Thank you! If you have more questions, start over by saying 'hi'."), sender, phone_id)
         reset_conversation(sender)
        
-    elif any(response in prompt_lower for response in yes_responses):
+    elif _contains_signal(prompt_lower, yes_responses):
         thanks_map = {
             "shona": "Tinokutendai! Tichakubatai mukati memaminitsi mashoma kuti muwedzere ruzivo nezvekutenga.",
             "ndebele": "Siyabonga! Sizokuthinta emizuzwini embalwa ukuze uthole eminye imininingwane ngokuthenga.",
@@ -2244,28 +2314,20 @@ def format_products_for_display(products_list, lang):
 
 
 # ─────────────────────────────────────────────
-#  CORE FIX: handle_conversation_state now
-#  runs maybe_update_language FIRST, before
-#  any routing. All handlers then read lang
-#  fresh from state["language"].
+#  MAIN CONVERSATION ROUTER
 # ─────────────────────────────────────────────
 
 def handle_conversation_state(sender, prompt, phone_id):
     state = user_states[sender]
     current_step = state.get("step")
 
-    # ── STEP 1: Update language on EVERY message (skip during registration) ──
     if current_step not in ["language_detection", "registration"]:
         maybe_update_language(sender, prompt)
-        # Re-read state after potential language update
         state = user_states[sender]
 
-    # ── STEP 1b: Human-agent session relay ──────────────────────────────────
-    # If user is already in an active agent chat, forward their message and stop.
     if current_step == "human_agent_chat":
         relayed = relay_user_message_to_agent(sender, prompt, phone_id)
         if not relayed:
-            # Session may have been cleaned up already; return user to bot
             user_states[sender]["step"] = "main_menu"
             user_states[sender].pop("agent_phone", None)
             save_single_user_state(sender)
@@ -2281,10 +2343,8 @@ def handle_conversation_state(sender, prompt, phone_id):
             send(back_map.get(lang, "Your agent session has ended. Returning you to Rudo. How can I help?"), sender, phone_id)
         return
 
-    # If user is waiting for an agent, check whether the request has timed out
     if current_step == "waiting_for_agent":
         if prompt.strip().upper() == "CANCEL":
-            # User cancels their own request
             if redis_client:
                 try:
                     redis_client.delete(_agent_request_key(sender))
@@ -2304,15 +2364,12 @@ def handle_conversation_state(sender, prompt, phone_id):
             }
             send(cancel_map.get(lang, "Your request has been cancelled. Returning you to Rudo."), sender, phone_id)
         else:
-            # Check if the Redis key has expired (timeout)
             check_agent_request_timeout(sender, phone_id)
         return
 
-    # ── STEP 1c: Human-agent request detection ───────────────────────────────
     if current_step not in ["language_detection", "registration"]:
         if is_human_agent_request(prompt):
             lang = user_states[sender].get("language", "english")
-            # Tell user we're looking for an agent
             connecting_map = {
                 "shona": (
                     "🔍 Tiri kutsvaga mubatsiri wemunhu kuti akubatsirei...\n"
@@ -2349,7 +2406,6 @@ def handle_conversation_state(sender, prompt, phone_id):
                 connecting_map.get(lang, (
                     "🔍 Looking for a human agent to assist you...\n"
                     "Please wait.\n"
-                    
                 )),
                 sender, phone_id
             )
@@ -2358,8 +2414,6 @@ def handle_conversation_state(sender, prompt, phone_id):
             notify_agents_of_request(sender, phone_id)
             return
 
-    # ── STEP 2: Universal greeting/reset intercept ───────────────────────────
-    # Fires AFTER language update so greeting response is in the new language
     ALL_GREETINGS = [
         "hi", "hello", "hey", "hie", "hi there",
         "good morning", "good afternoon", "good evening",
@@ -2373,16 +2427,11 @@ def handle_conversation_state(sender, prompt, phone_id):
     reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset", "help"]
     prompt_lower = prompt.lower().strip()
 
-    is_greeting = any(
-        prompt_lower == w or re.search(rf"\b{re.escape(w)}\b", prompt_lower)
-        for w in ALL_GREETINGS
-    )
-    is_reset = any(kw in prompt_lower for kw in reset_keywords)
+    is_greeting = _contains_signal(prompt_lower, ALL_GREETINGS)
+    is_reset = _contains_signal(prompt_lower, reset_keywords)
 
-    # Only intercept when not in the initial registration steps
     if (is_greeting or is_reset) and current_step not in ["language_detection", "registration"]:
         reset_conversation(sender)
-        # Re-read lang AFTER reset (reset_conversation preserves language)
         lang = user_states[sender]["language"]
         greet_map = {
             "shona": "Mhoroi! Ndingakubatsirei nhasi?",
@@ -2395,8 +2444,6 @@ def handle_conversation_state(sender, prompt, phone_id):
         send(greet_map.get(lang, "Hello! How can I help you today?"), sender, phone_id)
         return
 
-    # ── STEP 3: Route to the correct handler ────────────────────────────────
-    # Every handler reads lang fresh from state["language"] at its own top
     current_step = state.get("step")
 
     if current_step == "language_detection" and state.get("first_message", True):
@@ -2502,12 +2549,12 @@ def handle_cervical_more_info(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
    
-    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "Emukwayi", "yebo"]
-    no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "cha", "ayi",  "iyo", "Awe"]
+    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "emukwayi", "yebo"]
+    no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "cha", "ayi", "iyo", "awe"]
    
-    if any(response in prompt_lower for response in yes_responses):
+    if _contains_signal(prompt_lower, yes_responses):
         ask_cervical_question_number(sender, phone_id)
-    elif any(response in prompt_lower for response in no_responses):
+    elif _contains_signal(prompt_lower, no_responses):
         state["step"] = "product_inquiry"
         handle_follow_up(sender, "no", phone_id)
     else:
@@ -2583,12 +2630,12 @@ def handle_keep_learning(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
    
-    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "emukwayi", "ehe", "yebo"]
+    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "emukwayi", "yebo"]
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "cha", "ayi", "awe", "iyo"]
    
-    if any(response in prompt_lower for response in yes_responses):
+    if _contains_signal(prompt_lower, yes_responses):
         ask_cervical_question_number(sender, phone_id)
-    elif any(response in prompt_lower for response in no_responses):
+    elif _contains_signal(prompt_lower, no_responses):
         state["step"] = "product_inquiry"
         handle_follow_up(sender, "no", phone_id)
     else:
@@ -2625,10 +2672,10 @@ def handle_another_week(sender, prompt, phone_id):
     lang = state["language"]
     prompt_lower = prompt.lower().strip()
    
-    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "emukwayi", "ehe", "yebo"]
+    yes_responses = ["yes", "yeah", "yep", "please", "ehe", "hongu", "ndizvo", "inde", "emukwayi", "yebo"]
     no_responses = ["no", "nah", "nope", "hapana", "kwete", "aiwa", "a'a", "not really", "cha", "ayi", "awe", "iyo"]
    
-    if any(response in prompt_lower for response in yes_responses):
+    if _contains_signal(prompt_lower, yes_responses):
         state["step"] = "ask_week"
         week_map = {
             "shona": "Ndapota isa vhiki re pamuviri ",
@@ -2641,7 +2688,7 @@ def handle_another_week(sender, prompt, phone_id):
         send(week_map.get(lang, "Please enter your pregnancy week number "), sender, phone_id)
         save_single_user_state(sender)
        
-    elif any(response in prompt_lower for response in no_responses):
+    elif _contains_signal(prompt_lower, no_responses):
         state["step"] = "product_inquiry"
         state["topic"] = "maternal"
        
@@ -2694,10 +2741,6 @@ def _get_fallback(lang: str) -> str:
     }.get(lang, "Sorry, there was a problem getting an answer.")
 
 
-# ─────────────────────────────────────────────
-#  CONVERSATION CONTEXT BUILDER
-# ─────────────────────────────────────────────
-
 def build_conversation_context(sender: str, max_turns: int = 6) -> str:
     """
     Returns the last `max_turns` exchanges (user + bot) as a formatted
@@ -2708,10 +2751,7 @@ def build_conversation_context(sender: str, max_turns: int = 6) -> str:
     if not history:
         return ""
 
-    # Take the most recent entries, excluding the very last (current user msg
-    # already added before this call, so history[-1] IS the current message —
-    # we skip it to avoid duplication in the prompt)
-    recent = history[-( max_turns * 2 + 1):-1]   # up to 12 entries, skip last
+    recent = history[-( max_turns * 2 + 1):-1]
 
     lines = []
     for entry in recent:
@@ -2719,7 +2759,6 @@ def build_conversation_context(sender: str, max_turns: int = 6) -> str:
         message = entry.get("message", "").strip()
         if not message:
             continue
-        # Skip very short bot filler messages (thinking indicators, yes/no prompts)
         if role == "bot" and len(message) < 20:
             continue
         tag = "User" if role == "user" else "Assistant"
@@ -2901,7 +2940,7 @@ def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
             "Felelisa ka temoso ye nyinyani ye e re ziboho ze ha zi nkeleli sibaka sa ku lekolwa ki dokota.\n\n"
         ),
     }.get(lang, (
-        "You are a professional health assistant specializing in maternal health and cervical cancer for Dawa Health. "
+        "You are a professional health assistant specializing in maternal health, sexual reproductive health and cervical cancer for Dawa Health. "
         "Answer the user question using correct and evidence-based health information. "
         "DO NOT start with phrases like Okay, Sure, or Let me explain. "
         "Start directly with the answer. "
@@ -3160,7 +3199,6 @@ def webhook():
                                         sender = message["from"]
                                         phone_id = value["metadata"]["phone_number_id"]
 
-                                        # ── INTERACTIVE BUTTON REPLY (agent Accept/Reject) ──
                                         if message.get("type") == "interactive":
                                             interactive = message.get("interactive", {})
                                             if interactive.get("type") == "button_reply":
@@ -3172,37 +3210,29 @@ def webhook():
                                                 elif btn_id.startswith("agent_reject:"):
                                                     user_num = btn_id.split("agent_reject:", 1)[1]
                                                     handle_agent_reject(sender, user_num, phone_id)
-                                            continue  # skip normal processing for interactive msgs
+                                            continue
 
                                         if "text" in message:
                                             prompt = message["text"]["body"]
                                             logging.info(f"Processing message from {sender}: {prompt}")
 
-                                            # ── AGENT → USER relay ──────────────────────────
-                                            # Normalise both sides: webhook sender has no '+',
-                                            # AGENTS dict values may have '+'.
                                             _agent_phones_norm = {normalize_phone(p) for p in AGENTS.values()}
                                             if normalize_phone(sender) in _agent_phones_norm:
                                                 relayed = relay_agent_message_to_user(sender, prompt, phone_id)
                                                 if relayed:
-                                                    continue  # message was handled
+                                                    continue
 
-                                            # ── Normal user message ──────────────────────────
-                                            # Ensure state exists
                                             is_new = ensure_user_state(sender)
                                             if not is_new:
                                                 user_states[sender]["first_message"] = False
                                             
-                                            # Save incoming message to conversation history
                                             save_user_conversation(sender, "user", prompt)
                                             
-                                            # ── Referral source detection ────────────────────
                                             referral = extract_referral_source(prompt)
                                             if referral:
                                                 save_referral_source(sender, referral)
                                                 logging.info(f"Referral detected for {sender}: {referral}")
                                             
-                                            # ── SINGLE entry point ───────────────────────────
                                             handle_conversation_state(sender, prompt, phone_id)
 
                                         else:
