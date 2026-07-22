@@ -3170,6 +3170,32 @@ def agent_timeout():
 @app.route("/", methods=["GET"])
 def home():
     return render_template("connected.html")
+    
+
+@app.route("/api/benchmark", methods=["POST"])
+def benchmark_test():
+    try:
+        data = request.get_json()
+        prompt = data.get("prompt")
+        
+        # 1. Simulate a test sender ID
+        test_sender = "1234567890" 
+        ensure_user_state(test_sender)
+        
+        # 2. Call your internal RAG conversation state processor
+        # NOTE: You will need to modify your code slightly if handle_conversation_state 
+        # doesn't return the text string. Alternatively, call the core LLM/RAG function directly here.
+        # Example representation:
+        ai_response_text = your_core_rag_function(test_sender, prompt) 
+        
+        return jsonify({
+            "status": "success",
+            "model_output": ai_response_text
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
