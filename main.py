@@ -3176,17 +3176,37 @@ def home():
 def benchmark_test():
     try:
         data = request.get_json()
+        if not data or "prompt" not in data:
+            return jsonify({"status": "error", "message": "Missing 'prompt' in request payload"}), 400
+            
         prompt = data.get("prompt")
         
-        # 1. Simulate a test sender ID
+        # 1. Initialize the state tracking just like your webhook does
         test_sender = "1234567890" 
         ensure_user_state(test_sender)
         
-        # 2. Call your internal RAG conversation state processor
-        # NOTE: You will need to modify your code slightly if handle_conversation_state 
-        # doesn't return the text string. Alternatively, call the core LLM/RAG function directly here.
-        # Example representation:
-        ai_response_text = your_core_rag_function(test_sender, prompt) 
+        # 2. Use your real built-in language detector to handle the incoming prompt
+        lang = detect_language(prompt, test_sender)
+        user_states[test_sender]["language"] = lang
+        
+        # 3. Create a clean system prompt forcing a Multiple-Choice answer for MamaBench
+        benchmark_instructions = (
+            "You are an expert medical AI assistant evaluating maternal and paediatric clinical data. "
+            "Analyze the following patient narrative carefully, identify the correct diagnostic choice, "
+            "and respond clearly with ONLY the single option letter (A, B, C, or D) representing your answer."
+        )
+        
+        # 4. Invoke your real Gemini instance using the exact variables from your main.py
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            system_instruction=benchmark_instructions
+        )
+        
+        # Run inference synchronously over HTTP
+        response = gemini_model.generate_content(prompt)
+        ai_response_text = response.text.strip()
         
         return jsonify({
             "status": "success",
@@ -3194,7 +3214,9 @@ def benchmark_test():
         }), 200
         
     except Exception as e:
+        logging.error(f"Benchmark endpoint crashed: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 @app.route("/webhook", methods=["GET", "POST"])
