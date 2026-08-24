@@ -663,7 +663,7 @@ def save_user_conversation(sender, role, message):
             })
             if len(conversation) > 100:
                 conversation = conversation[-100:]
-            redis_client.set(f"conversation:{sender}", json.dumps(conversation), ex=60*60*24*30)
+            redis_client.set(f"conversation:{sender}", json.dumps(conversation))
             logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
             logging.error(f"Error saving conversation: {e}")
