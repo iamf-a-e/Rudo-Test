@@ -707,9 +707,12 @@ def _llm_detect_language(message: str):
     return None
 
 
+
 def detect_language(message, sender=None):
     message_lower = message.lower().strip()
 
+    # Pure digit entries (menu choices, week numbers, etc.) are never a
+    # language signal — keep whatever language is already set.
     if message_lower.isdigit():
         if sender and sender in user_states:
             return user_states[sender].get("language", "english")
@@ -719,7 +722,8 @@ def detect_language(message, sender=None):
     if sender and sender in user_states:
         current_lang = user_states[sender].get("language", "english")
 
-    # ── Exact single-word greeting matches ───────────────────────────────────
+    # ── Fast path: exact single-word greeting matches ───────────────────
+    # Cheap and unambiguous — no need to hit the LLM for these.
     exact_matches = {
         "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
                       "zvakanaka", "wadini", "taura", "kwete"],
@@ -737,9 +741,23 @@ def detect_language(message, sender=None):
             logging.info(f"Exact match: {message_lower} -> {lang}")
             return lang
 
-    # NOTE: "kuti" removed from Shona — it's a shared Bantu conjunction used
-    # across Bemba/Nyanja/Tonga too, and treating it as Shona-exclusive was
-    # dragging unrelated-language messages toward Shona incorrectly.
+    # ── Primary: Gemini classification, run on every real message ───────
+    # No word-count gate — even short local-language phrases ("sei",
+    # "chii") are worth a real classification rather than falling
+    # through to keyword scoring.
+    llm_guess = _llm_detect_language(message)
+    if llm_guess:
+        if llm_guess != current_lang:
+            logging.info(f"[LLM] Language switch for {sender}: {current_lang} -> {llm_guess}")
+        return llm_guess
+
+    logging.warning(
+        f"[detect_language] Gemini classification failed/empty for {sender!r} "
+        f"— falling back to keyword scoring"
+    )
+
+    # ── Offline fallback: keyword/phrase scoring (only reached if the ──
+    # ── Gemini call raised or returned nothing usable)                ──
     language_keywords = {
         "shona": [
             "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
@@ -785,8 +803,13 @@ def detect_language(message, sender=None):
             "mbubo", "buumi", "chibadela", "kaambo nzi",
         ],
         "english": [
-            "what", "how", "when", "why", "where", "signs", "symptoms",
-            "information", "please", "thank", "sorry", "help", "watch", "during", "risky",
+            # Trimmed down from the original list — dropped the most
+            # generic stopwords ("what", "how", "please", "help",
+            # "thank") that show up as loanwords inside local-language
+            # messages and were inflating English's score enough to
+            # tie with the real language.
+            "signs", "symptoms", "information", "sorry", "watch",
+            "during", "risky",
         ],
     }
 
@@ -818,84 +841,27 @@ def detect_language(message, sender=None):
     max_score = max(scores.values()) if scores else 0
 
     if max_score > 0:
-        # Collect ALL languages tied at the top — don't just take whichever
-        # one Python's max() returns first by dict insertion order.
         top_langs = [lang for lang, s in scores.items() if s == max_score]
-        logging.info(f"Language scores: {scores} -> candidates: {top_langs}")
+        logging.info(f"[fallback] Keyword scores: {scores} -> candidates: {top_langs}")
 
-        # If the current language is among the top scorers, stay put —
-        # resolves ties without an arbitrary language-order bias.
-        if current_lang in top_langs:
-            return current_lang
-
-        # Only switch if exactly one language reached the max AND the
-        # signal is strong enough (a phrase match, or several keyword hits)
-        # — a single generic keyword (score of 3) alone is not enough.
-        if len(top_langs) == 1 and max_score >= 5:
+        if len(top_langs) == 1:
+            # Unique winner — trust it even if it differs from current_lang.
+            # (No more "current_lang wins ties" bias — a real tie is
+            # handled below, but a clean win is a clean win.)
             return top_langs[0]
 
-        logging.info(f"Ambiguous/low-confidence detection ({max_score}, candidates={top_langs}); keeping {current_lang}")
-        return current_lang
-
-    # ── No local keyword/phrase signal at all. Try the LLM classifier   ──────
-    # ── before falling back to the English-ratio heuristic or English   ──────
-    # ── default — this covers vocabulary gaps in the keyword lists.     ──────
-    words_in_msg = re.findall(r"[a-z]+", message_lower)
-
-    if len(words_in_msg) >= 3:
-        llm_guess = _llm_detect_language(message)
-        if llm_guess:
-            if llm_guess != current_lang:
-                logging.info(f"[LLM fallback] Switching language: {current_lang} -> {llm_guess}")
-            return llm_guess
-
-    # ── English-ratio fallback: only reached if the LLM call failed/skipped ──
-    common_english_words = {
-        "the","a","an","is","are","was","were","be","been","being",
-        "have","has","had","do","does","did","will","would","could","should",
-        "may","might","shall","can","need","must","ought",
-        "i","you","he","she","it","we","they","me","him","her","us","them",
-        "my","your","his","its","our","their","this","that","these","those",
-        "what","which","who","whom","whose","where","when","why","how",
-        "and","or","but","if","then","so","because","although","while",
-        "not","no","yes","please","thank","thanks","sorry","okay","ok",
-        "to","of","in","on","at","for","from","with","about","during",
-        "tell","give","show","help","know","want","need","get","go","come",
-        "see","look","take","make","say","ask","work","feel","think","try",
-        "use","find","early","late","common","normal","severe","pain","blood",
-        "baby","mother","health","information","more","other","any","all",
-        "some","much","many","very","also","just","only","still","even",
-        "back","too","well","good","bad","new","old","long","little","right",
-        "big","high","low","next","last","between","after","before","since",
-        "until","without","within","up","down","over","under","again",
-        "further","once","same","own","both","each","few","most","such",
-        "than","as","by","into","through","against","along","following",
-        "across","behind","beyond","plus","except","including","throughout",
-        "towards","upon","concerning",
-    }
-    unique_words = set(words_in_msg)
-
-    if len(words_in_msg) >= 5 and unique_words:
-        en_count = sum(1 for w in unique_words if w in common_english_words)
-        ratio = en_count / len(unique_words)
-
-        if ratio >= 0.40:
-            logging.info(f"English override: {en_count}/{len(unique_words)} words matched ({ratio:.0%})")
-            if current_lang != "english" and ratio < 0.7:
-                logging.info(f"Sticking with {current_lang} despite moderate English ratio ({ratio:.0%})")
-                return current_lang
-            return "english"
-
-    if all(ord(c) < 128 for c in message_lower):
-        if current_lang != "english":
-            logging.info(f"Pure ASCII, no keyword match — keeping existing language: {current_lang}")
+        # Genuine tie between two or more languages with no LLM signal
+        # to break it — only *now* does current_lang get any preference,
+        # and only as a last resort among equally-scored candidates.
+        if current_lang in top_langs:
             return current_lang
-        logging.info("Pure ASCII with no local-language keyword match and no prior context -> English")
-        return "english"
+        return top_langs[0]
 
-    logging.info("No language detected, defaulting to English")
-    return "english"
-
+    # No LLM signal and no keyword signal at all — safest fallback is to
+    # keep the existing language rather than guess.
+    logging.info(f"[fallback] No signal at all for {sender!r}, keeping {current_lang}")
+    return current_lang
+    
 
 def is_question(prompt):
     prompt_lower = prompt.lower().strip()
@@ -3170,54 +3136,6 @@ def agent_timeout():
 @app.route("/", methods=["GET"])
 def home():
     return render_template("connected.html")
-    
-
-@app.route("/api/benchmark", methods=["POST"])
-def benchmark_test():
-    try:
-        data = request.get_json()
-        if not data or "prompt" not in data:
-            return jsonify({"status": "error", "message": "Missing 'prompt' in request payload"}), 400
-            
-        prompt = data.get("prompt")
-        
-        # 1. Initialize the state tracking just like your webhook does
-        test_sender = "1234567890" 
-        ensure_user_state(test_sender)
-        
-        # 2. Use your real built-in language detector to handle the incoming prompt
-        lang = detect_language(prompt, test_sender)
-        user_states[test_sender]["language"] = lang
-        
-        # 3. Create a clean system prompt forcing a Multiple-Choice answer for MamaBench
-        benchmark_instructions = (
-            "You are an expert medical AI assistant evaluating maternal and paediatric clinical data. "
-            "Analyze the following patient narrative carefully, identify the correct diagnostic choice, "
-            "and respond clearly with ONLY the single option letter (A, B, C, or D) representing your answer."
-        )
-        
-        # 4. Invoke your real Gemini instance using the exact variables from your main.py
-        gemini_model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            system_instruction=benchmark_instructions
-        )
-        
-        # Run inference synchronously over HTTP
-        response = gemini_model.generate_content(prompt)
-        ai_response_text = response.text.strip()
-        
-        return jsonify({
-            "status": "success",
-            "model_output": ai_response_text
-        }), 200
-        
-    except Exception as e:
-        logging.error(f"Benchmark endpoint crashed: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
