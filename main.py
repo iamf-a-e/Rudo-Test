@@ -1173,7 +1173,7 @@ def handle_general_followup(sender, prompt, phone_id):
         "mwaiseni", "muli shani",
         "mwa bona",
     ]
-    reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
+    reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset"]
 
     is_greeting = _contains_signal(prompt_lower, greeting_words)
     is_reset    = _contains_signal(prompt_lower, reset_keywords)
@@ -1296,7 +1296,7 @@ def handle_main_menu(sender, prompt, phone_id):
     logging.info(f"User {sender} said: '{prompt}' (lowercase: '{prompt_lower}')")
     logging.info(f"Current state: step={state.get('step')}, topic={state.get('topic')}, language={lang}")
 
-    reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset", "help"]
+    reset_keywords = ["start over", "restart", "new conversation", "main menu", "menu", "reset"]
     greeting_words = [
         "hi", "hello", "hey", "hie", "hi there", "good morning", "good afternoon", "good evening",
         "mhoro", "mhoroi", "hesi", "makadini", "wadini",
@@ -2390,7 +2390,7 @@ def handle_conversation_state(sender, prompt, phone_id):
         "mwaiseni", "muli shani", "shani",
         "mwa bona",
     ]
-    reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset", "help"]
+    reset_keywords = ["start over", "restart", "new conversation", "main menu", "reset"]
     prompt_lower = prompt.lower().strip()
 
     is_greeting = _contains_signal(prompt_lower, ALL_GREETINGS)
