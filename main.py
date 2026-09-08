@@ -696,7 +696,7 @@ def _llm_detect_language(message: str):
         gemini_model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={"temperature": 0, "max_output_tokens": 10},
-            safety_settings=_classifier_safety_settings,
+            safety_settings=safety_settings,
         )
         response = gemini_model.generate_content(classifier_prompt)
 
