@@ -1002,10 +1002,20 @@ def remove(*file_paths):
 #  Continuous language detection
 # ─────────────────────────────────────────────
 
+# How often (in messages) to force a language re-check even on digit-only
+# input or steps that would normally skip detection. Prevents a wrong
+# language from getting permanently frozen in Redis.
+LANGUAGE_RECHECK_EVERY_N = 8
+
+
 def maybe_update_language(sender, prompt):
     """
-    Re-detect language on every incoming message (after registration).
-    Updates user state language if a different language is detected.
+    Re-detect language on incoming messages (after registration).
+    - Normally skips pure-digit messages (menu choices, week numbers) to
+      save LLM calls.
+    - Every LANGUAGE_RECHECK_EVERY_N messages, forces a re-check using
+      recent conversation history even if the current message is digits,
+      so a bad early detection doesn't stay wrong forever.
     Returns the (possibly updated) language string.
     """
     state = user_states[sender]
@@ -1014,11 +1024,35 @@ def maybe_update_language(sender, prompt):
     if current_step in ["language_detection", "registration"]:
         return state.get("language", "english")
 
-    if prompt.strip().isdigit():
-        return state.get("language", "english")
-
-    detected = detect_language(prompt, sender)
     current_lang = state.get("language", "english")
+
+    # Track how many messages we've seen since the last real check.
+    msg_count = state.get("_lang_check_counter", 0) + 1
+    state["_lang_check_counter"] = msg_count
+
+    is_digit_only = prompt.strip().isdigit()
+    force_recheck = (msg_count % LANGUAGE_RECHECK_EVERY_N == 0)
+
+    if is_digit_only and not force_recheck:
+        return current_lang
+
+    if is_digit_only and force_recheck:
+        # Don't classify the digit string itself — pull the last
+        # non-digit thing the user actually said and classify that.
+        history = get_user_conversation(sender)
+        last_text = None
+        for entry in reversed(history):
+            if entry.get("role") != "user":
+                continue
+            msg = entry.get("message", "").strip()
+            if msg and not msg.isdigit():
+                last_text = msg
+                break
+        if not last_text:
+            return current_lang
+        detected = detect_language(last_text, sender)
+    else:
+        detected = detect_language(prompt, sender)
 
     if detected != current_lang:
         logging.info(f"[maybe_update_language] Language switch for {sender}: {current_lang} -> {detected}")
