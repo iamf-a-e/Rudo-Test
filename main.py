@@ -2946,7 +2946,7 @@ def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
     company_website = "https://dawa-health.com/"
     company_phone   = "+260 571 376 677"
 
-    def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
+def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
     context = build_conversation_context(sender) if sender else ""
