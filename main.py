@@ -1062,6 +1062,22 @@ def maybe_update_language(sender, prompt):
     return state["language"]
 
 
+ENGLISH_TELLS = {
+    "the", "is", "are", "you", "your", "how", "many", "months", "week", "weeks",
+    "should", "would", "could", "will", "does", "doctor", "please", "thank",
+    "and", "with", "this", "that", "have", "has", "when", "what", "can",
+}
+
+def looks_like_english_leak(text: str, lang: str) -> bool:
+    if lang == "english" or not text:
+        return False
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if len(words) < 6:
+        return False
+    hits = sum(1 for w in words if w in ENGLISH_TELLS)
+    return (hits / len(words)) > 0.15
+    
+
 def handle_language_detection(sender, prompt, phone_id):
     detected_lang = detect_language(prompt, sender)
     user_states[sender]["language"] = detected_lang
@@ -1688,7 +1704,7 @@ def handle_main_menu(sender, prompt, phone_id):
         save_single_user_state(sender)
         return
 
-    maternal_keywords = ["pamuviri", "pakati", "pregnancy", "pregnant", "baby", "maternal", "nhumbu"]
+    maternal_keywords = ["pamuviri", "pakati", "pregnancy", "pregnant", "baby", "maternal", "nhumbu", "fumo", "chibeleko", "isisu", "mimba", "buimana", "bubulemi", "kurutsa", "bump", "months", "trimester", "chibereko",]
     question_words = ["what", "how", "when", "why", "can", "should", "kuti", "sei", "ngani", "kodi", "bwanji", "chifukwa", "ndeipi", "ndiani", "nzira", "zviratidzo", "zizindikiro"]
    
     is_direct_question = (
@@ -2784,6 +2800,7 @@ def build_conversation_context(sender: str, max_turns: int = 6) -> str:
     return "Previous conversation:\n" + "\n".join(lines) + "\n\n"
 
 
+
 def ask_gemini(question: str, lang: str = "english", sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
@@ -2843,7 +2860,7 @@ def ask_gemini(question: str, lang: str = "english", sender: str = None) -> str:
         if text is None:
             return fallback
 
-        if _looks_like_english_leak(text, lang):
+        if looks_like_english_leak(text, lang):
             logging.warning(f"[ask_gemini] English leak detected for lang={lang}, retrying with stricter enforcement")
             strict_prompt = (
                 f"CRITICAL: Your entire reply must be written only in {lang.capitalize()}. "
@@ -2851,7 +2868,7 @@ def ask_gemini(question: str, lang: str = "english", sender: str = None) -> str:
                 f"{base_prompt}"
             )
             retry_text = _generate(strict_prompt, temperature=0.3)
-            if retry_text and not _looks_like_english_leak(retry_text, lang):
+            if retry_text and not looks_like_english_leak(retry_text, lang):
                 return retry_text
             return text  # fall back to first attempt if retry didn't help
 
@@ -2922,6 +2939,16 @@ def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
     fallback = _get_fallback(lang)
 
+    context = build_conversation_context(sender) if sender else ""
+
+    company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
+    company_email   = "hello@dawa-health.com"
+    company_website = "https://dawa-health.com/"
+    company_phone   = "+260 571 376 677"
+
+    def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
+    lang_enforce = _get_lang_enforce(lang)
+    fallback = _get_fallback(lang)
     context = build_conversation_context(sender) if sender else ""
 
     company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
@@ -3008,6 +3035,46 @@ def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
         logging.error(f"[ask_gemini_general Error] {type(e).__name__}: {e}")
         return fallback
 
+
+    base_prompt = f"{lang_enforce}\n\n{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
+
+    def _generate(prompt_text, temperature):
+        gen_config = dict(generation_config)
+        gen_config["temperature"] = temperature
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=gen_config,
+            safety_settings=safety_settings
+        )
+        response = gemini_model.generate_content(prompt_text)
+        try:
+            text = response.text
+            return text.strip() if text and text.strip() else None
+        except (ValueError, AttributeError) as ve:
+            logging.warning(f"[ask_gemini_general] Blocked/empty lang={lang}: {ve}")
+            return None
+
+    try:
+        text = _generate(base_prompt, temperature=0.5)
+        if text is None:
+            return fallback
+
+        if _looks_like_english_leak(text, lang):
+            logging.warning(f"[ask_gemini_general] English leak detected for lang={lang}, retrying")
+            strict_prompt = (
+                f"CRITICAL: Your entire reply must be written only in {lang.capitalize()}. "
+                f"Do not include any English sentences or phrases, even if the question contains English words.\n\n"
+                f"{base_prompt}"
+            )
+            retry_text = _generate(strict_prompt, temperature=0.3)
+            if retry_text and not _looks_like_english_leak(retry_text, lang):
+                return retry_text
+            return text
+
+        return text
+    except Exception as e:
+        logging.error(f"[ask_gemini_general Error] {type(e).__name__}: {e}")
+        return fallback
 
 
 def handle_ask_week(sender, prompt, phone_id):
