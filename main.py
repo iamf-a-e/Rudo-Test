@@ -739,17 +739,66 @@ def detect_language(message, sender=None):
     # ── Fast path: exact single-word greeting matches ───────────────────
     # Cheap and unambiguous — no need to hit the LLM for these.
     exact_matches = {
-        "shona":     ["mhoro", "mhoroi", "makadini", "hesi", "hapana", "ndizvo",
-                      "zvakanaka", "wadini", "taura", "kwete"],
-        "ndebele":   ["sawubona", "salibonani", "unjani", "yebo", "ngiyabonga",
-                      "ngicela", "impela", "kunjani", "hatshi", "kambe"],
-        "bemba":     ["mwaiseni", "ulishani", "nalikutemwa", "natotela", "shani", "chisuma", "sana", "njelelako",
-                      "twatotela", "mukwai", "napapata"],
-        "chinyanja": ["moni", "zikomo", "pepani", "ndithu", "chonde", "eyaa",
-                      "nitandizeni", "nankani"],
-        "tonga":     ["mwabuka", "mwalandwa", "ndatotela", "kapati", "mbuti"],
-        "lozi":      ["ndalumba", "haa", "kacenu", "muzuhile"],
-    }
+    "shona": [
+        "mhoro", "mhoroi", "makadini", "hesi",
+        "maswera", "mangwanani", "manheru",
+        "ndinonzi", "ndatenda", "ndinotenda",
+        "ndapota", "ndibatsirei", "batsirai",
+        "pamuviri", "nhumbu", "chibereko",
+        "chiremba", "kurwadziwa", "kusvotwa",
+        "gomarara", "zviratidzo", "muviri",
+    ],
+
+    "ndebele": [
+        "sawubona", "salibonani", "unjani", "linjani",
+        "ngiyabonga", "siyabonga", "ngicela", "ngiyacela",
+        "ngisize", "ngidinga", "angikwazi",
+        "ukukhulelwa", "isibeletho", "izimpawu",
+        "udokotela", "ubuhlungu", "umhlaza",
+        "imikhiqizo",
+    ],
+
+    "bemba": [
+        "mwaiseni", "ulishani", "muli shani",
+        "nalikutemwa", "natotela", "twatotela",
+        "njelelako", "napapata", "ngafweniko",
+        "nshishibe", "bushe kuti",
+        "umwanakashi", "abanakashi", "wanakashi",
+        "fumo", "kufuma", "iloba",
+        "ifyakulya", "cilikwisa", "ubushiku",
+        "ukubomba", "icisungu", "icibemba",
+        "shaleenipo", "ubuchende",
+    ],
+
+    "chinyanja": [
+        "moni", "zikomo", "zikomo kwambiri",
+        "pepani", "ndapota", "chonde",
+        "nitandizeni", "nankani", "thandizani",
+        "ndithandizeni", "sindikudziwa",
+        "ndikufuna", "ndikumva", "ndinafuna",
+        "matenda", "zizindikiro", "dokotala",
+        "mavitamini", "thanzo",
+    ],
+
+    "tonga": [
+        "mwabuka", "mwabukile", "mwalandwa",
+        "ndatotela", "lugwazyo", "mubuzyo",
+        "zitondezyo", "mutumbu", "dokota",
+        "kusilikwa", "mbubo", "buumi",
+        "chibadela", "kaambo nzi", "kaambo",
+    ],
+
+    "lozi": [
+        "ndalumba", "ndalumba hahulu",
+        "zibonelelo", "kuhula", "kushisa",
+        "maviki", "mutango", "mupilo",
+        "mubonelelo", "kacenu", "muzuhile",
+        "kimanzibwana", "mulumele",
+        "silelezwa", "musimbi", "bulwazi",
+        "wapimwa",
+    ],
+}
+    
     for lang, words in exact_matches.items():
         if message_lower in words:
             logging.info(f"Exact match: {message_lower} -> {lang}")
@@ -773,60 +822,84 @@ def detect_language(message, sender=None):
     # ── Offline fallback: keyword/phrase scoring (only reached if the ──
     # ── Gemini call raised or returned nothing usable)                ──
     language_keywords = {
-        "shona": [
-            "mhoro", "mhoroi", "makadini", "ndinonzi", "zvakanaka", "ndatenda",
-            "pamuviri", "zvigadzirwa", "chirwere", "gomarara", "chibereko",
-            "zviratidzo", "chiremba", "kusvotwa", "kurwadziwa",
-            "handina", "ndinoda", "zvichava", "zvakadaro",
-            "kwete", "hapana", "ndizvo", "zvakafanana",
-            "ndoziva", "nhumbu", "ndine", "ndiri", "ndinoziva",
-            "sei", "zvii", "vanhu", "muviri", "mazuva",
-            "hesi", "masvingo", "musha", "kuita",
-            "ndakadaro", "zviripo", "zvinobvira",
-        ],
-        "ndebele": [
-            "sawubona", "salibonani", "unjani", "ngiyabonga", "ngicela",
-            "isisu", "umntwana", "imikhiqizo", "umhlaza", "isibeletho",
-            "izimpawu", "udokotela", "igazi", "ubuhlungu",
-            "angikwazi", "ngifuna", "ukukhulelwa", "abantu",
-            "akukho", "impela", "kakhulu",
-        ],
-        "chinyanja": [
-            "moni", "zikomo", "pepani", "ndapota",
-            "matenda", "kansa", "zizindikiro", "dokotala",
-            "magazi", "zabwino", "sindikudziwa", "ndikufuna",
-            "sabata", "zambiri", "thanzo", "mavitamini",
-            "nitandizeni", "nankani", "vumo", "mimba", "bwanji",
-            "thandizani", "ndimva", "ndikumva", "ndinafuna",
-        ],
-        "lozi": [
-            "ndalumba", "zibonelelo", "kuhula", "kushisa",
-            "maviki", "mutango", "mupilo", "mubonelelo",
-            "kacenu", "muzuhile", "kimanzibwana", "mulumele",
-            "mutu", "lilimo", "silelezwa", "butuku", "musimbi",
-            "bulwazi", "cwale", "wakona", "wapimwa",
-        ],
-        "bemba": [
-            "mwaiseni", "nalikutemwa", "natotela", "twatotela", "mukwai",
-            "ngafweniko", "cilikwisa", "ubushiku", "ifyakulya",
-            "ukubomba", "icisungu", "icibemba", "shaleenipo",
-        ],
-        "tonga": [
-            "ndalumba", "lugwazyo", "mubuzyo", "kapati", "zitondezyo",
-            "mutumbu", "dokota", "cinzi", "buti", "makani", "kusilikwa",
-            "mbubo", "buumi", "chibadela", "kaambo nzi",
-        ],
-        "english": [
-            # Trimmed down from the original list — dropped the most
-            # generic stopwords ("what", "how", "please", "help",
-            # "thank") that show up as loanwords inside local-language
-            # messages and were inflating English's score enough to
-            # tie with the real language.
-            "signs", "symptoms", "information", "sorry", "watch",
-            "during", "risky",
-        ],
-    }
+    "shona": [
+        "mhoro", "mhoroi", "makadini", "ndinonzi",
+        "ndatenda", "ndinotenda", "ndapota",
+        "pamuviri", "zvigadzirwa", "chirwere",
+        "gomarara", "chibereko", "zviratidzo",
+        "chiremba", "kusvotwa", "kurwadziwa",
+        "handina", "ndinoda", "zvichava",
+        "zvakadaro", "ndoziva", "ndinoziva",
+        "nhumbu", "ndakadaro", "zviripo",
+        "zvinobvira", "ndibatsirei", "batsirai",
+        "maita basa",
+    ],
 
+    "ndebele": [
+        "sawubona", "salibonani", "unjani", "linjani",
+        "ngiyabonga", "siyabonga", "ngicela",
+        "ngiyacela", "ngisize", "ngidinga",
+        "angikwazi", "ngifuna", "ngiyazi",
+        "ukukhulelwa", "isisu", "umntwana",
+        "imikhiqizo", "umhlaza", "isibeletho",
+        "izimpawu", "udokotela", "igazi",
+        "ubuhlungu", "akukho",
+    ],
+
+    "chinyanja": [
+        "moni", "zikomo", "zikomo kwambiri",
+        "pepani", "ndapota", "chonde",
+        "nitandizeni", "nankani", "thandizani",
+        "ndithandizeni", "sindikudziwa",
+        "sindikufuna", "ndikufuna", "ndimva",
+        "ndikumva", "ndinafuna",
+        "matenda", "kansa", "zizindikiro",
+        "dokotala", "magazi", "mavitamini",
+        "thanzo",
+    ],
+
+    "lozi": [
+        "ndalumba", "ndalumba hahulu",
+        "zibonelelo", "kuhula", "kushisa",
+        "maviki", "mutango", "mupilo",
+        "mubonelelo", "kacenu", "muzuhile",
+        "kimanzibwana", "mulumele",
+        "silelezwa", "butuku", "musimbi",
+        "bulwazi", "wapimwa",
+    ],
+
+    "bemba": [
+        "mwaiseni", "ulishani", "muli shani",
+        "nalikutemwa", "natotela", "twatotela",
+        "mukwai", "napapata", "njelelako",
+        "ngafweniko", "nshishibe",
+        "bushe kuti",
+        "umwanakashi", "abanakashi", "wanakashi",
+        "fumo", "kufuma", "iloba",
+        "ifyakulya", "cilikwisa", "ubushiku",
+        "ukubomba", "icisungu", "icibemba",
+        "shaleenipo", "ubuchende",
+    ],
+
+    "tonga": [
+        "mwabuka", "mwabukile", "mwalandwa",
+        "ndatotela", "lugwazyo", "mubuzyo",
+        "zitondezyo", "mutumbu", "dokota",
+        "kusilikwa", "mbubo", "buumi",
+        "chibadela", "kaambo nzi", "kaambo",
+    ],
+
+    "english": [
+        "symptoms", "information", "pregnancy",
+        "pregnant", "doctor", "medicine",
+        "cancer", "cervix", "uterus",
+        "bleeding", "pain", "nausea",
+        "vomiting", "antenatal", "maternal",
+        "health", "appointment", "clinic",
+        "borehole", "quote",
+    ],
+}
+    
     language_phrases = {
         "chinyanja": ["muli bwanji", "uli ndi chani", "zikomo kwambiri",
                       "muli bwino", "ndili bwino", "nitandizeni nankani"],
@@ -2757,7 +2830,7 @@ def _get_lang_enforce(lang: str) -> str:
         "lozi":      "Arabela ka Silozi feela. U se ke wa sebelisa Siingelesi.",
         "bemba":     "Yasuka mu Cibemba fye. Wibonfya icingeleshi.",
         "tonga":     "Mupandule mu Chitonga buyo. Mutabelezyi Ciingelezi.",
-    }.get(lang, "Respond in English only.")
+    }.get(lang, "Respond in the user's detected language only.")
 
 
 def _get_fallback(lang: str) -> str:
@@ -2935,16 +3008,6 @@ def ask_gemini_cancer(question: str, lang: str = "english", sender: str = None) 
         return fallback
 
 
-def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
-    lang_enforce = _get_lang_enforce(lang)
-    fallback = _get_fallback(lang)
-
-    context = build_conversation_context(sender) if sender else ""
-
-    company_address = "No. 50 Lunsemfwa Rd, Kalundu, Lusaka, Zambia"
-    company_email   = "hello@dawa-health.com"
-    company_website = "https://dawa-health.com/"
-    company_phone   = "+260 571 376 677"
 
 def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
@@ -3024,6 +3087,7 @@ def ask_gemini_general(question: str, lang: str, sender: str = None) -> str:
             if text and text.strip():
                 return text.strip()
         except (ValueError, AttributeError) as ve:
+            logging.info(f"[LANG DEBUG] sender={sender} | "f"prompt={prompt!r} | "f"detected_lang={lang}")
             logging.warning(f"[ask_gemini_general] Blocked/empty lang={lang}: {ve}")
             try:
                 finish = response.candidates[0].finish_reason
