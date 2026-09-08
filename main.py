@@ -80,7 +80,9 @@ generation_config = {
 
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},   
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
 
@@ -694,9 +696,22 @@ def _llm_detect_language(message: str):
         gemini_model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={"temperature": 0, "max_output_tokens": 10},
-            safety_settings=safety_settings,
+            safety_settings=_classifier_safety_settings,
         )
         response = gemini_model.generate_content(classifier_prompt)
+
+        if not response.candidates:
+            logging.warning("[_llm_detect_language] No candidates returned at all")
+            return None
+
+        candidate = response.candidates[0]
+        if candidate.finish_reason != 1:  # 1 == STOP (normal completion)
+            logging.warning(
+                f"[_llm_detect_language] Non-STOP finish_reason={candidate.finish_reason} "
+                f"safety_ratings={getattr(candidate, 'safety_ratings', None)}"
+            )
+            return None
+
         guess = re.sub(r"[^a-z]", "", response.text.strip().lower())
         if guess in supported:
             logging.info(f"[_llm_detect_language] Classified as: {guess}")
@@ -705,7 +720,6 @@ def _llm_detect_language(message: str):
     except Exception as e:
         logging.error(f"[_llm_detect_language Error] {type(e).__name__}: {e}")
     return None
-
 
 
 def detect_language(message, sender=None):
