@@ -2820,26 +2820,46 @@ def ask_gemini(question: str, lang: str = "english", sender: str = None) -> str:
         "Answer the following question clearly, simply, and with accurate health information:\n\n"
     ))
 
-    prompt = f"{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
+    base_prompt = f"{lang_enforce}\n\n{instruction_body}{context}Current question: {question}\n\n{lang_enforce}"
 
-    try:
+    def _generate(prompt_text, temperature):
+        gen_config = dict(generation_config)
+        gen_config["temperature"] = temperature
         gemini_model = genai.GenerativeModel(
             model_name=model_name,
-            generation_config=generation_config,
+            generation_config=gen_config,
             safety_settings=safety_settings
         )
-        response = gemini_model.generate_content(prompt)
+        response = gemini_model.generate_content(prompt_text)
         try:
             text = response.text
-            if text and text.strip():
-                return text.strip()
+            return text.strip() if text and text.strip() else None
         except (ValueError, AttributeError) as ve:
             logging.warning(f"[ask_gemini] Blocked/empty lang={lang}: {ve}")
-        return fallback
+            return None
+
+    try:
+        text = _generate(base_prompt, temperature=0.5)
+        if text is None:
+            return fallback
+
+        if _looks_like_english_leak(text, lang):
+            logging.warning(f"[ask_gemini] English leak detected for lang={lang}, retrying with stricter enforcement")
+            strict_prompt = (
+                f"CRITICAL: Your entire reply must be written only in {lang.capitalize()}. "
+                f"Do not include any English sentences or phrases, even if the question contains English words.\n\n"
+                f"{base_prompt}"
+            )
+            retry_text = _generate(strict_prompt, temperature=0.3)
+            if retry_text and not _looks_like_english_leak(retry_text, lang):
+                return retry_text
+            return text  # fall back to first attempt if retry didn't help
+
+        return text
     except Exception as e:
         logging.error(f"[ask_gemini Error] {type(e).__name__}: {e}")
         return fallback
-
+        
 
 def ask_gemini_cancer(question: str, lang: str = "english", sender: str = None) -> str:
     lang_enforce = _get_lang_enforce(lang)
