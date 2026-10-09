@@ -154,6 +154,14 @@ Greeting & Registration 2:
 User: Hey DawaMom, I got connected from Mandebvu Clinic Poster 1.
 Bot: Hello! How can I help you today?
 
+Greeting & Registration 3:
+User: Mandebvu clinic poster 1.
+Bot: Hello! How can I help you today?
+
+Greeting & Registration 4:
+User: Hey DawaMom, I got connected from Cancer Awareness.
+Bot: Hello! How can I help you today?
+
 
 Pregnancy Query:
 User: I think I'm pregnant.
@@ -183,8 +191,6 @@ CLOSING:
 Always end conversations politely and professionally.
 Returning users should be welcomed back in their preferred language.
 """
-
-
 
 
 
