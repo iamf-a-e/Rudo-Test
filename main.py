@@ -1449,81 +1449,56 @@ def looks_like_english_leak(text: str, lang: str) -> bool:
     return (hits / len(words)) > 0.15
     
 
+def auto_register(sender):
+    """Derive the last 4 digits from the WhatsApp number and create the user ID."""
+    state = user_states[sender]
+    digits = re.sub(r"\D", "", sender)[-4:]          # sender is already digits only, this is just defensive
+    letters = ''.join(random.choices(string.ascii_uppercase, k=4))
+    state["phone_digits"] = digits
+    state["user_id"] = f"DH-{digits}-{letters}"
+    state["registered"] = True
+    state["step"] = "main_menu"
+    return state["user_id"]
+
+
+def send_welcome_with_id(sender, phone_id, lang, user_id):
+    welcome_map = {
+        "shona": f"Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. ID yenyu ndeye: {user_id}. Chengetedza ID iyi nekuti ichakumbirwa kumaDawa clinics. Ndingakubatsirei nhasi?",
+        "ndebele": f"Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. I-ID yakho ithi: {user_id}. Gcina le ID ngoba izocelwa kumaDawa clinics. Ngingakusiza ngani namuhla?",
+        "bemba": f"Mwaiseni! Nine Rudo, wakufwailisha wa Dawa Health. ID yenu ni: {user_id}. Sungeni ID iyi pantu ikabombwa ku Dawa clinics. Nga kuti namwafwa shani lelo?",
+        "chinyanja": f"Moni! Ndine Rudo, mphungu wa Dawa Health. ID yanu ndi: {user_id}. Sungani ID iyi chifukwa idzafunsidwa kumakliniki a Dawa. Ndingakuthandizireni lero?",
+        "tonga": f"Muli buti! Ndime Rudo, wakugwasya Dawa Health. ID yenu nji: {user_id}. Mweelede kuisunga kabotu ID kambo iyakubeleka ku Dawa clinics. Nga ndamukyasya buti lino?",
+        "lozi": f"Mwa bona! Mina ki Rudo, mubasi wa ku thusa wa Dawa Health. ID ya hao ki: {user_id}. Boloka ID ye hantši kakuli u ta buzwa yona kwa makiliniki a Dawa. Nka ku thusa ka mini sunu?",
+    }
+    send(
+        welcome_map.get(
+            lang,
+            f"Hello! I'm Rudo, Dawa Health's virtual assistant. Your ID is: {user_id}. "
+            f"Keep this ID safe because it'll be asked for at the Dawa clinics. How can I help you today?"
+        ),
+        sender, phone_id
+    )
+
+
 def handle_language_detection(sender, prompt, phone_id):
     detected_lang = detect_language(prompt, sender)
     user_states[sender]["language"] = detected_lang
-    user_states[sender]["step"] = "registration"
     user_states[sender]["needs_language_confirmation"] = False
 
-    if detected_lang == "shona":
-        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Ndapota ndipe manhamba mana ekupedzisira enhare yenyu.", sender, phone_id)
-    elif detected_lang == "ndebele":
-        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. Ngicela unginike amadijithi amane okugcina efoni yakho.", sender, phone_id)
-    elif detected_lang == "bemba":
-        send("Mwaiseni! Nine Rudo, wakufwailisha wa Dawa Health. Tiyeni tampilepo ukulembesha. Cisuma mpeele amanamba ayi 4 ayalekelesha sha ku foni namba yenu.", sender, phone_id)
-    elif detected_lang == "chinyanja":
-        send("Moni! Ndine Rudo, mphungu wa Dawa Health. Tiyambireni ndi kulembetsa. Chonde ndipatseni manambala anayi omaliza a nambala yanu yafoni.", sender, phone_id)
-    elif detected_lang == "tonga":
-        send("Muli buti! Ndime Rudo, wakugwasya Dawa Health. Atutalikile kulembezya. amundipe ma nambala ali 4 ali kumamanino ya foni namba yenu", sender, phone_id)
-    elif detected_lang == "lozi":
-        send("Mwa bona! Mina ki Rudo, mubasi wa ku thusa wa Dawa Health wa ku kompyuta. A re simule ka ku itambula. Ndapota, nipe dinomolo za mafelele a mane za foni ya hao.", sender, phone_id)
-    else:
-        send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. Please tell me the last 4 digits of your phone number.", sender, phone_id)
-    
+    user_id = auto_register(sender)
+    send_welcome_with_id(sender, phone_id, detected_lang, user_id)
     save_single_user_state(sender)
 
 
 def handle_registration(sender, prompt, phone_id):
-    """
-    Registration now STRICTLY requires exactly 4 digits and nothing else.
-    Any other input (a question, a word, digits mixed with text, more or
-    fewer than 4 digits) is rejected and the user is re-prompted — it will
-    never be silently accepted as the phone digits.
-    """
     state = user_states[sender]
-    lang = state["language"]
-    prompt_clean = prompt.strip()
-
     if state.get("phone_digits") is None:
-        if not re.fullmatch(r"\d{4}", prompt_clean):
-            invalid_map = {
-                "shona": "Ndapota nyorai manhamba mana chete ekupedzisira enhare yenyu (semuenzaniso: 1234).",
-                "ndebele": "Ngicela ubhale amadijithi amane kuphela okugcina enombolweni yakho yocingo (isibonelo: 1234).",
-                "chinyanja": "Chonde lembani manambala anayi okha omaliza a nambala yanu yafoni (mwachitsanzo: 1234).",
-                "tonga": "Ndakomba mulembe ma nambala aane luzutu aakumaninina anambala yenu ya foni (mucikozyanyo: 1234).",
-                "bemba": "Napapata lembeni fye amanambala 4 ayakulekelesha kuli nambala yenu ya foni (ichilangililo: 1234).",
-                "lozi": "Ndapota ñola dinomolo za mafelele a mane feela za foni ya hao (mutala: 1234).",
-            }
-            send(invalid_map.get(lang, "Please send only the last 4 digits of your phone number (e.g. 1234)."), sender, phone_id)
-            save_single_user_state(sender)
-            return  # stay on the registration step, do not advance
-
-        state["phone_digits"] = prompt_clean
-        
-        random_letters = ''.join(random.choices(string.ascii_uppercase, k=4))
-        user_id = f"DH-{prompt_clean}-{random_letters}"
-        state["user_id"] = user_id
-        
-        if lang == "shona":
-            send(f"Ndatenda! ID yenyu yakagadzirwa ndeye: {user_id}. Chengetedza ID iyi nekuti ichakumbirwa kumaDawa clinics. Ndingakubatsirei nhasi?", sender, phone_id)
-        elif lang == "ndebele":
-            send(f"Ngiyabonga! I-ID yakho eyakhiwe ithi: {user_id}. Gcina le ID ngoba izocelwa kumaDawa clinics. Ngingakusiza ngani namuhla?", sender, phone_id)
-        elif lang == "bemba":
-            send(f"Natotela! ID yenu iyapangwa ni: {user_id}. Sungeni ID iyi pantu ikabombwa ku Dawa clinics. Nga kuti namwafwa shani lelo?", sender, phone_id)
-        elif lang == "chinyanja":
-            send(f"Zikomo! ID yanu yopangidwa ndi: {user_id}. Sungani ID iyi chifukwa idzafunsidwa kumakliniki a Dawa. Ndingakuthandizireni lero?", sender, phone_id)
-        elif lang == "tonga":
-            send(f"Twalumba! ID yenu nji: {user_id}. mweelede kuisunga kabotu ID kambo iyakubeleka ku Dawa clinics. Nga ndamukyasya buti lino?", sender, phone_id)
-        elif lang == "lozi":
-            send(f"Ndalumba! ID ya wena ye e bupilwe ki: {user_id}. Boloka ID ye hantši kakuli u ta buzwa yona kwa makiliniki a Dawa. Nka ku thusa ka mini sunu?", sender, phone_id)
-        else:
-            send(f"Thank you! Your generated ID is: {user_id}. Keep this ID safe because it'll be asked for at the Dawa clinics. How can I help you today?", sender, phone_id)
-        
-        state["registered"] = True
+        user_id = auto_register(sender)
+        send_welcome_with_id(sender, phone_id, state["language"], user_id)
+    else:
         state["step"] = "main_menu"
-    
     save_single_user_state(sender)
-
+    
 
 def handle_follow_up(sender, prompt, phone_id):
     state = user_states[sender]
